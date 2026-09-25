@@ -316,6 +316,24 @@ test("Middleware Chain Integration Tests", async (t) => {
     },
   );
 
+  // ── Scenario 5b: invalid X-Request-ID is replaced with a generated UUID ──
+  await t.test(
+    "5b. Request Tracking — malformed or oversized X-Request-ID is replaced with a UUID",
+    async () => {
+      const uuidRe =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      for (const sentId of ["x".repeat(65), "bad id with spaces", "inject\tlog"]) {
+        const res = await fetch(`${baseUrl}/health`, {
+          headers: { [REQUEST_ID_HEADER]: sentId },
+        });
+        assert.strictEqual(res.status, 200);
+        const echoedId = res.headers.get(REQUEST_ID_HEADER);
+        assert.notStrictEqual(echoedId, sentId);
+        assert.match(echoedId ?? "", uuidRe);
+      }
+    },
+  );
+
   // ── Scenario 6: Oversized body → 413 Payload Too Large ───────────────────
   // mockEnv.requestBodyLimit is "1mb". Send ~1.1 MiB to exceed it.
   // express.json() emits a PayloadTooLargeError (status 413) before the handler runs.

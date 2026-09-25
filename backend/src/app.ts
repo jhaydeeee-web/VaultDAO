@@ -46,8 +46,8 @@ import { createJsonWithRawBody, createHmacSigningMiddleware } from "./shared/htt
 import { ErrorCode } from "./shared/http/errorCodes.js";
 import {
   REQUEST_ID_HEADER,
-  generateRequestId,
   requestIdStorage,
+  resolveRequestId,
 } from "./shared/http/requestId.js";
 import { createRequestLogger } from "./shared/http/requestLogger.js";
 import { createRequestContextMiddleware } from "./shared/http/requestContext.js";
@@ -140,7 +140,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   // Request ID middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const id = req.get(REQUEST_ID_HEADER) ?? generateRequestId();
+    const id = resolveRequestId(req.get(REQUEST_ID_HEADER));
     res.set(REQUEST_ID_HEADER, id);
     (req as any).requestId = id;
     requestIdStorage.run(id, next);
