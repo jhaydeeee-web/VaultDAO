@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { AdminAuditLogStore } from "./admin-audit.store.js";
+import { SqliteConnectionPool } from "../../shared/storage/sqlite-pool.js";
 import { createAdminAuditLogMiddleware } from "./admin-audit.middleware.js";
 import { getAdminAuditLogController } from "./admin-audit.controller.js";
 
@@ -43,7 +44,8 @@ function makeRes() {
 }
 
 test("admin audit middleware: writes an entry once the response finishes", async () => {
-  const store = new AdminAuditLogStore(":memory:");
+  const pool = new SqliteConnectionPool(":memory:");
+  const store = new AdminAuditLogStore(pool);
   const middleware = createAdminAuditLogMiddleware(store);
   const req = makeReq({ body: { origin: "https://example.com", apiKey: "shh" } });
   const { res } = makeRes();
@@ -64,11 +66,12 @@ test("admin audit middleware: writes an entry once the response finishes", async
   assert.strictEqual(entry.statusCode, 200);
   assert.strictEqual(JSON.parse(entry.requestBody!).apiKey, "[REDACTED]");
 
-  store.close();
+  pool.close();
 });
 
 test("admin audit middleware: records the actual status code, including auth failures", async () => {
-  const store = new AdminAuditLogStore(":memory:");
+  const pool = new SqliteConnectionPool(":memory:");
+  const store = new AdminAuditLogStore(pool);
   const middleware = createAdminAuditLogMiddleware(store);
   const req = makeReq({ method: "GET", originalUrl: "/api/v1/admin/config" });
   const { res } = makeRes();
@@ -83,11 +86,12 @@ test("admin audit middleware: records the actual status code, including auth fai
   const { entries } = store.list();
   assert.strictEqual(entries[0]!.statusCode, 403);
 
-  store.close();
+  pool.close();
 });
 
 test("GET /admin/audit-log: returns recorded entries", () => {
-  const store = new AdminAuditLogStore(":memory:");
+  const pool = new SqliteConnectionPool(":memory:");
+  const store = new AdminAuditLogStore(pool);
   store.record({
     timestamp: "2026-08-26T00:00:00.000Z",
     method: "POST",
@@ -108,11 +112,12 @@ test("GET /admin/audit-log: returns recorded entries", () => {
   assert.strictEqual(body.data.total, 1);
   assert.strictEqual(body.data.entries[0].endpoint, "/api/v1/admin/rotate-api-key");
 
-  store.close();
+  pool.close();
 });
 
 test("GET /admin/audit-log: clamps limit to the configured maximum", () => {
-  const store = new AdminAuditLogStore(":memory:");
+  const pool = new SqliteConnectionPool(":memory:");
+  const store = new AdminAuditLogStore(pool);
   for (let i = 0; i < 3; i++) {
     store.record({
       timestamp: new Date(2026, 0, 1, 0, 0, i).toISOString(),
@@ -133,5 +138,5 @@ test("GET /admin/audit-log: clamps limit to the configured maximum", () => {
   assert.strictEqual(body.data.entries.length, 3);
   assert.strictEqual(body.data.total, 3);
 
-  store.close();
+  pool.close();
 });

@@ -57,6 +57,7 @@ import { initFeatureFlags, getFeatureFlags } from "./shared/feature-flags.js";
 import { initRpcPool } from "./shared/rpc-pool.js";
 import { createDrainMiddleware } from "./shared/http/drain.js";
 import { createLogger } from "./shared/logging/logger.js";
+import { getSqlitePool, isPrivateDatabase } from "./shared/storage/sqlite-pool.js";
 
 const logger = createLogger("app");
 
@@ -251,7 +252,16 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   // ── Admin Audit Log ──────────────────────────────────────────────────────────
   // Records every call under /admin — including rejected auth attempts — so a
   // compromised Admin key leaves a trail of what was accessed or changed.
-  const adminAuditLogStore = new AdminAuditLogStore(env.databasePath ?? ":memory:");
+  // The trail must outlive the process, so production refuses to fall back to
+  // a private in-memory database.
+  if (env.nodeEnv === "production" && isPrivateDatabase(env.databasePath ?? "")) {
+    throw new Error(
+      "DATABASE_PATH must point to a persistent SQLite file in production; the admin audit log cannot be kept in memory.",
+    );
+  }
+  const adminAuditLogStore = new AdminAuditLogStore(
+    getSqlitePool(env.databasePath ?? ":memory:", { size: env.sqlitePoolSize }),
+  );
   v1Router.use("/admin", createAdminAuditLogMiddleware(adminAuditLogStore));
 
   v1Router.get(
