@@ -237,6 +237,14 @@ pub enum VestingKey {
     Reserved(Address),
 }
 
+/// Per-token balances earmarked for escrows and streams (#1698)
+#[contracttype(export = false)]
+#[derive(Clone)]
+pub enum ReserveKey {
+    ReservedEscrow(Address),
+    ReservedStream(Address),
+}
+
 #[contracttype(export = false)]
 #[derive(Clone)]
 pub enum CalendarKey {
@@ -530,6 +538,53 @@ pub fn set_reserved_vesting(env: &Env, token: &Address, amount: i128) {
     env.storage()
         .persistent()
         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+fn get_reserve(env: &Env, key: &ReserveKey) -> i128 {
+    env.storage().persistent().get(key).unwrap_or(0)
+}
+
+fn adjust_reserve(env: &Env, key: ReserveKey, delta: i128) {
+    let updated = get_reserve(env, &key).saturating_add(delta).max(0);
+    env.storage().persistent().set(&key, &updated);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_reserved_escrow(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedEscrow(token.clone()))
+}
+
+pub fn reserve_escrow(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedEscrow(token.clone()), amount);
+}
+
+pub fn release_escrow_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedEscrow(token.clone()), -amount);
+}
+
+pub fn get_reserved_stream(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedStream(token.clone()))
+}
+
+pub fn reserve_stream(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedStream(token.clone()), amount);
+}
+
+pub fn release_stream_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedStream(token.clone()), -amount);
+}
+
+/// Sum of every earmarked balance for `token`: vesting, escrow, stream,
+/// insurance pool, stake pool and collected fees (#1698).
+pub fn get_total_reserved(env: &Env, token: &Address) -> i128 {
+    get_reserved_vesting(env, token)
+        .saturating_add(get_reserved_escrow(env, token))
+        .saturating_add(get_reserved_stream(env, token))
+        .saturating_add(get_insurance_pool(env, token))
+        .saturating_add(get_stake_pool(env, token))
+        .saturating_add(get_fees_collected(env, token))
 }
 
 // ============================================================================
@@ -2112,26 +2167,37 @@ pub fn get_notification_prefs(env: &Env, addr: &Address) -> Option<NotificationP
         .get(&FeatureKey::NotificationPrefs(addr.clone()))
 }
 
+/// Hard cap on the number of addresses in the notification prefs index (#1704).
+/// Bounds the loop in `compute_relevant_signers` on proposal creation/execution.
+pub const MAX_NOTIFICATION_SUBSCRIBERS: u32 = 50;
+
 /// Persist rich notification preferences and register the signer in the prefs
 /// index so `compute_relevant_signers` can enumerate all opted-in addresses.
-pub fn set_notification_prefs(env: &Env, prefs: &NotificationPrefs) {
-    env.storage()
-        .instance()
-        .set(&FeatureKey::NotificationPrefs(prefs.signer.clone()), prefs);
+/// Fails with `NotificationIndexFull` once the index reaches its hard cap.
+pub fn set_notification_prefs(env: &Env, prefs: &NotificationPrefs) -> Result<(), VaultError> {
     // Keep the index up-to-date
     let mut index = get_notification_prefs_index(env);
     if !index.contains(&prefs.signer) {
+        if index.len() >= MAX_NOTIFICATION_SUBSCRIBERS {
+            return Err(VaultError::NotificationIndexFull);
+        }
         index.push_back(prefs.signer.clone());
+        let key = DataKey::NotificationPrefsIndex;
+        env.storage().persistent().set(&key, &index);
         env.storage()
-            .instance()
-            .set(&DataKey::NotificationPrefsIndex, &index);
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
     }
-}
-
-/// All addresses that have ever called `set_notification_prefs`.
-pub fn get_notification_prefs_index(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
+        .set(&FeatureKey::NotificationPrefs(prefs.signer.clone()), prefs);
+    Ok(())
+}
+
+/// All addresses that have registered notification prefs (bounded, persistent).
+pub fn get_notification_prefs_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
         .get(&DataKey::NotificationPrefsIndex)
         .unwrap_or_else(|| Vec::new(env))
 }

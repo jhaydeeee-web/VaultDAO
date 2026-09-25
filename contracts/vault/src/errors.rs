@@ -472,6 +472,16 @@ pub enum VaultError {
     // =========================================================
     /// veto_addresses is non-empty but veto_window_ledgers is 0 (veto would be silently disabled)
     InvalidVetoConfig = 1136,
+    // Issue #1708: Swap price-impact arithmetic
+    // =========================================================
+    /// Checked arithmetic overflowed
+    ArithmeticOverflow = 1137,
+    /// Oracle returned an unusable (zero or negative) price
+    OracleError = 1138,
+    // Issue #1704: Bounded notification index
+    // =========================================================
+    /// Notification subscriber index has reached its hard cap
+    NotificationIndexFull = 1139,
 }
 
 // Compatibility markers for CI source checks:
