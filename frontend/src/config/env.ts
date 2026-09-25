@@ -54,5 +54,11 @@ export const env = {
     'VITE_PRICE_FEED_URL',
     'https://api.coingecko.com/api/v3/simple/price',
   ),
+  /**
+   * JSON widget registry backing the Widget Marketplace (preview). Defaults to
+   * the repo-hosted registry in public/widgets/registry.json; point it at a
+   * backend endpoint once one exists.
+   */
+  widgetRegistryUrl: optionalEnv('VITE_WIDGET_REGISTRY_URL', '/widgets/registry.json'),
   walletIdleTimeoutMs: parseInt(optionalEnv('VITE_WALLET_IDLE_TIMEOUT_MS', '900000'), 10),
 } as const;
