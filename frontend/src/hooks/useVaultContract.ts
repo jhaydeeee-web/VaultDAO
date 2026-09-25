@@ -48,6 +48,7 @@ import {
     formatFeeBreakdown,
 } from '../utils/simulation';
 import { subscribeToLedgers } from '../utils/ledgerSubscription';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
 import { eventPayloadDigest } from '../utils/auditVerification';
 
 const EVENTS_PAGE_SIZE = 20;
@@ -411,9 +412,7 @@ export const useVaultContract = () => {
             console.warn(`Failed to load account for read operation (${source}):`, error);
             throw new Error(`Unable to perform read operation: invalid source account (${source})`);
         }
-        const tx = new TransactionBuilder(account, { fee: "100" })
-            .setNetworkPassphrase(env.networkPassphrase)
-            .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
             .addOperation(Operation.invokeHostFunction({
                 func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                     new xdr.InvokeContractArgs({
@@ -639,9 +638,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -681,9 +678,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -716,9 +711,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -751,9 +744,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -787,9 +778,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -819,9 +808,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -851,9 +838,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -883,9 +868,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1016,9 +999,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
 
         try {
             const account = await server.getAccount(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1347,9 +1328,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const source = address ?? env.contractId;
             const account = await server.getAccount(source);
             const vaultAddress = Address.fromString(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1393,9 +1372,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const account = await server.getAccount(source);
             const contractAddr = Address.fromString(tokenAddress).toScAddress();
 
-            const buildTx = (fn: string) => new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const buildTx = async (fn: string) => (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({ contractAddress: contractAddr, functionName: fn, args: [] })
@@ -1405,7 +1382,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
                 .build();
 
             const parseResult = async (fn: string): Promise<unknown> => {
-                const sim = await server.simulateTransaction(buildTx(fn));
+                const sim = await server.simulateTransaction(await buildTx(fn));
                 if (SorobanRpc.Api.isSimulationError(sim)) return null;
                 const retval = (sim as { result?: { retval?: unknown } })?.result?.retval;
                 if (retval == null) return null;
@@ -1628,9 +1605,7 @@ interface RecurringPaymentRaw {
                 const tokenAddress = params.token === 'native'
                     ? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC' // XLM SAC on testnet
                     : params.token;
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1667,9 +1642,7 @@ interface RecurringPaymentRaw {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1735,9 +1708,7 @@ interface RecurringPaymentRaw {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: "100" })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1780,9 +1751,7 @@ interface RecurringPaymentRaw {
                 setLoading(true);
                 try {
                     const account = await server.getAccount(_addr);
-                    const tx = new TransactionBuilder(account, { fee: "100" })
-                        .setNetworkPassphrase(env.networkPassphrase)
-                        .setTimeout(30)
+                    const tx = (await newTransactionBuilder(account))
                         .addOperation(Operation.invokeHostFunction({
                             func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                                 new xdr.InvokeContractArgs({

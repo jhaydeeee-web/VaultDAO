@@ -54,5 +54,9 @@ export const env = {
     'VITE_PRICE_FEED_URL',
     'https://api.coingecko.com/api/v3/simple/price',
   ),
+  /** Multiplier applied to the network fee (from getFeeStats, or BASE_FEE as fallback). */
+  feeMultiplier: parseFloat(optionalEnv('VITE_FEE_MULTIPLIER', '1.5')),
+  /** Upper bound, in stroops, for the inclusion fee the app will offer. */
+  maxBaseFee: parseInt(optionalEnv('VITE_MAX_BASE_FEE', '100000'), 10),
   walletIdleTimeoutMs: parseInt(optionalEnv('VITE_WALLET_IDLE_TIMEOUT_MS', '900000'), 10),
 } as const;

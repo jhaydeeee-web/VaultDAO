@@ -18,6 +18,7 @@ import {
 import { useWallet } from './useWallet';
 import { env } from '../config/env';
 import { parseError } from '../utils/errorParser';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
 import type { Escrow, EscrowStatus, Milestone, MilestoneStatus, EscrowDispute } from '../types/escrow';
 
 const server = new SorobanRpc.Server(env.sorobanRpcUrl);
@@ -225,9 +226,7 @@ export function useEscrow(): UseEscrowReturn {
       setVerifyingMilestone(key);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(
@@ -296,9 +295,7 @@ export function useEscrow(): UseEscrowReturn {
       setRaisingDispute(escrowId);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(
