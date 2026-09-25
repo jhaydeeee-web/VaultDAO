@@ -26,7 +26,7 @@ As of this writing the project has **749 contract tests** (across 35 `test_*.rs`
 
 ### Recommended split
 
-VaultDAO doesn't currently have end-to-end (e2e) tests — there's no Playwright or Cypress setup in the repo today. Given that, the realistic, evidence-based pyramid for this project is:
+VaultDAO has a small Playwright end-to-end suite in `frontend/e2e/` (run with `npm run test:e2e`; it is excluded from Vitest). The realistic, evidence-based pyramid for this project is:
 
 | Layer | Style | Approximate share | Why |
 |---|---|---|---|
@@ -34,7 +34,7 @@ VaultDAO doesn't currently have end-to-end (e2e) tests — there's no Playwright
 | Frontend component/hook tests | Unit + light integration | ~30% of all tests | `@testing-library/react` tests render real components with mocked wallet/SDK boundaries — closer to integration than pure unit, but still fast and isolated |
 | Backend unit + property tests | Unit + property-based | ~10% of all tests | Pure functions (normalizers, calculators) are perfect property-test candidates |
 | Backend integration tests (`supertest`) | Integration | ~5% of all tests | Spin up an in-memory Express app per test — no real server, no real network |
-| End-to-end | — | **0% — not yet set up** | If/when this is added, keep it the smallest slice; e2e is the slowest and flakiest layer by nature |
+| End-to-end (Playwright, `frontend/e2e/`) | E2E | smallest slice | Keep it the smallest slice; e2e is the slowest and flakiest layer by nature |
 
 This roughly mirrors the actual test counts in the repo today (749 contract / 571 frontend / 464 backend). If you're adding a new feature, default to a contract or backend **unit** test first; reach for an integration-style test only when you need to verify how multiple pieces interact (an HTTP route end-to-end, a component plus real DOM events).
 
@@ -672,11 +672,12 @@ test('processes a transaction once it succeeds', async () => {
 Node's built-in `mock` module (`node:test`'s `mock.fn()`) is usually enough — reach for a separate mocking library only if you need something it doesn't support (partial module mocking is more limited than Vitest's `vi.mock`).
 ## 5. CI Pipeline
 
-Every push and PR to `main` runs `.github/workflows/ci.yml` with two simple jobs:
+Every push and PR to `main` runs `.github/workflows/ci.yml` with these jobs:
 
 | Job | What it does |
 | --- | --- |
 | **Frontend** | `npm ci --legacy-peer-deps` + `npm run typecheck` in `frontend/` |
+| **Frontend E2E (Playwright)** | Installs Chromium and runs `npm run test:e2e -- --project=chromium` against the dev server in demo mode |
 | **Contract** | `cargo check --lib` in `contracts/vault/` |
 
 ### Running the same checks locally
@@ -686,6 +687,8 @@ Every push and PR to `main` runs `.github/workflows/ci.yml` with two simple jobs
 cd frontend
 npm install --legacy-peer-deps
 npm run typecheck
+npx playwright install chromium   # first time only
+npm run test:e2e -- --project=chromium
 
 # Contract
 cd contracts/vault
