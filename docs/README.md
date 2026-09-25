@@ -27,6 +27,7 @@ Hands-on how-tos for building and operating features.
 ### Product features
 
 - [Recurring payments](guides/RECURRING_PAYMENTS.md)
+- [Phased treasury disbursements](guides/PHASED_DISBURSEMENTS.md)
 - [Delegation](guides/DELEGATION_GUIDE.md)
 - [Expiration](guides/EXPIRATION_GUIDE.md)
 - [Approval timeout](guides/APPROVAL_TIMEOUT.md)
