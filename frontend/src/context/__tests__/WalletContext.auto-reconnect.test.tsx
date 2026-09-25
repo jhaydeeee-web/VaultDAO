@@ -5,7 +5,8 @@ import { WalletProvider } from '../WalletContext';
 import { useWallet } from '../useWallet';
 
 // Mock adapters
-const mockAdapter = {
+// vi.hoisted so the object exists when the hoisted vi.mock factory runs
+const mockAdapter = vi.hoisted(() => ({
   id: 'freighter',
   name: 'Freighter',
   url: 'https://freighter.app',
@@ -15,7 +16,7 @@ const mockAdapter = {
   getPublicKey: vi.fn().mockResolvedValue('GABC123'),
   getNetwork: vi.fn().mockResolvedValue('TESTNET'),
   signTransaction: vi.fn().mockResolvedValue('signed_xdr'),
-};
+}));
 
 vi.mock('../../adapters', () => ({
   detectAvailableWallets: vi.fn().mockResolvedValue([mockAdapter]),

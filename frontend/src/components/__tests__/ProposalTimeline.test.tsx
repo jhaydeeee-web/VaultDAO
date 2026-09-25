@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { ProposalTimeline, type ProposalTimelineProps } from '../ProposalTimeline';
 
 describe('ProposalTimeline', () => {
@@ -26,7 +26,7 @@ describe('ProposalTimeline', () => {
     render(<ProposalTimeline {...baseProps} />);
 
     expect(screen.getByText(/Proposal #1 Timeline/)).toBeInTheDocument();
-    expect(screen.getByText('Pending')).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-status-badge')).toHaveTextContent('Pending');
   });
 
   it('should display approval progress bar', () => {
@@ -50,9 +50,10 @@ describe('ProposalTimeline', () => {
     render(<ProposalTimeline {...baseProps} />);
 
     expect(screen.getByText('Status Progression')).toBeInTheDocument();
-    expect(screen.getByText('Pending')).toBeInTheDocument();
-    expect(screen.getByText('Approved')).toBeInTheDocument();
-    expect(screen.getByText('Executed')).toBeInTheDocument();
+    const progression = within(screen.getByTestId('status-progression'));
+    expect(progression.getByText('Pending')).toBeInTheDocument();
+    expect(progression.getByText('Approved')).toBeInTheDocument();
+    expect(progression.getByText('Executed')).toBeInTheDocument();
   });
 
   it('should render event history', () => {
@@ -113,7 +114,7 @@ describe('ProposalTimeline', () => {
     };
 
     render(<ProposalTimeline {...props} />);
-    expect(screen.getByText('Executed')).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-status-badge')).toHaveTextContent('Executed');
   });
 
   it('should display rejected status correctly', () => {
@@ -123,7 +124,7 @@ describe('ProposalTimeline', () => {
     };
 
     render(<ProposalTimeline {...props} />);
-    expect(screen.getByText('Rejected')).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-status-badge')).toHaveTextContent('Rejected');
     expect(screen.getByText(/This proposal has been rejected/)).toBeInTheDocument();
   });
 
@@ -134,7 +135,7 @@ describe('ProposalTimeline', () => {
     };
 
     render(<ProposalTimeline {...props} />);
-    expect(screen.getByText('Cancelled')).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-status-badge')).toHaveTextContent('Cancelled');
     expect(screen.getByText(/This proposal has been cancelled/)).toBeInTheDocument();
   });
 
@@ -147,7 +148,7 @@ describe('ProposalTimeline', () => {
     };
 
     render(<ProposalTimeline {...props} />);
-    expect(screen.getByText('Approved')).toBeInTheDocument();
+    expect(screen.getByTestId('proposal-status-badge')).toHaveTextContent('Approved');
     expect(screen.getByText(/100%/)).toBeInTheDocument();
   });
 

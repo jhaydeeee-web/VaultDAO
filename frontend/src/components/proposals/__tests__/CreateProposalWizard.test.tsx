@@ -11,17 +11,9 @@ vi.mock('../../../hooks/useWallet', () => ({
   }),
 }));
 
-vi.mock('../../../hooks/useCollaboration', () => ({
-  useCollaboration: () => ({
-    isConnected: false,
-    collaborators: [],
-    hasConflict: false,
-    updateField: vi.fn(),
-    updateCursor: vi.fn(),
-    getDraftState: () => ({}),
-    resolveConflict: vi.fn(),
-  }),
-}));
+// useCollaboration is intentionally NOT mocked: its localStorage fallback is
+// what persists drafts, and with collaboration disabled (the default) it never
+// opens a WebSocket.
 
 vi.mock('../TypingIndicator', () => ({
   TypingIndicator: () => null,

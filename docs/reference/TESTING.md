@@ -676,7 +676,7 @@ Every push and PR to `main` runs `.github/workflows/ci.yml` with these jobs:
 
 | Job | What it does |
 | --- | --- |
-| **Frontend** | `npm ci --legacy-peer-deps` + `npm run typecheck` in `frontend/` |
+| **Frontend** | `npm ci --legacy-peer-deps` + `npm run typecheck` + `npm test` (Vitest) in `frontend/` |
 | **Frontend E2E (Playwright)** | Installs Chromium and runs `npm run test:e2e -- --project=chromium` against the dev server in demo mode |
 | **Contract** | `cargo check --lib` in `contracts/vault/` |
 
@@ -687,6 +687,7 @@ Every push and PR to `main` runs `.github/workflows/ci.yml` with these jobs:
 cd frontend
 npm install --legacy-peer-deps
 npm run typecheck
+npm test
 npx playwright install chromium   # first time only
 npm run test:e2e -- --project=chromium
 
@@ -695,7 +696,7 @@ cd contracts/vault
 cargo check --lib
 ```
 
-Optional (not required by CI): `cargo test`, `npm test`, backend/SDK scripts.
+Optional (not required by CI): `cargo test`, backend/SDK scripts.
 
 ---
 

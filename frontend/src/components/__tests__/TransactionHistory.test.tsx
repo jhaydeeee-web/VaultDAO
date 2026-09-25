@@ -7,8 +7,9 @@ import type { VaultActivity } from '../../types/activity';
 vi.mock('../../hooks/useVaultContract', () => ({
   useVaultContract: vi.fn(() => ({
     getVaultEvents: vi.fn().mockResolvedValue({
-      events: [],
-      cursor: undefined,
+      activities: [],
+      latestLedger: '0',
+      hasMore: false,
     }),
   })),
 }));
@@ -70,9 +71,11 @@ describe('TransactionHistory CSV Export', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Same shape as GetVaultEventsResult returned by useVaultContract
     const mockGetVaultEvents = vi.fn().mockResolvedValue({
-      events: mockTransactions,
-      cursor: undefined,
+      activities: mockTransactions,
+      latestLedger: '125',
+      hasMore: false,
     });
     (useVaultContract as any).mockReturnValue({
       getVaultEvents: mockGetVaultEvents,

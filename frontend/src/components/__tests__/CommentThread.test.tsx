@@ -203,8 +203,9 @@ describe('CommentThread - Mention Parsing and Notifications', () => {
         />
       );
 
-      const editButton = screen.getByRole('button', { hidden: true });
-      expect(editButton).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /edit comment/i }));
+      // The edit textarea is pre-filled with the original text, mention included
+      expect(screen.getByDisplayValue(commentWithMention.text)).toBeInTheDocument();
     });
   });
 
