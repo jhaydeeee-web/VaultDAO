@@ -11,12 +11,15 @@ import { xdr, scValToNative } from 'stellar-sdk';
 import { useWallet } from './useWallet';
 import { useRealtime } from '../contexts/RealtimeContext';
 import { env } from '../config/env';
+import { fetchContractEvents, isAbortError } from '../utils/sorobanEvents';
 import type {
   SignerRecord,
   SignerActivity,
   LeaderboardFilters,
   SignerRole,
 } from '../types/governance';
+
+const LOOKBACK_LEDGERS = 100_000;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -188,47 +191,23 @@ export function useGovernance(): UseGovernanceReturn {
    * Fetch and derive leaderboard from on-chain events + vault config.
    * Falls back to mock data when no events are found.
    */
+  const leaderboardAbortRef = useRef<AbortController | null>(null);
+  const activityAbortRef = useRef<AbortController | null>(null);
+
   const fetchLeaderboard = useCallback(async () => {
+    leaderboardAbortRef.current?.abort();
+    const controller = new AbortController();
+    leaderboardAbortRef.current = controller;
+
     setLoading(true);
     setError(null);
     try {
-      // Fetch latest ledger
-      const latestRes = await fetch(env.sorobanRpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
+      // Fetch all contract events (paginated)
+      const { events } = await fetchContractEvents({
+        lookbackLedgers: LOOKBACK_LEDGERS,
+        signal: controller.signal,
       });
-      const latestData = await latestRes.json() as { result?: { sequence?: number } };
-      const latestLedger = latestData?.result?.sequence ?? 0;
-      const startLedger = Math.max(1, latestLedger - 100000);
-
-      // Fetch all contract events
-      const evRes = await fetch(env.sorobanRpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 2,
-          method: 'getEvents',
-          params: {
-            startLedger: String(startLedger),
-            filters: [{ type: 'contract', contractIds: [env.contractId] }],
-            pagination: { limit: 200 },
-          },
-        }),
-      });
-      const evData = await evRes.json() as {
-        result?: {
-          events?: Array<{
-            id: string;
-            topic?: string[];
-            value?: { xdr?: string };
-            ledgerClosedAt?: string;
-          }>;
-        };
-      };
-
-      const events = evData.result?.events ?? [];
+      if (controller.signal.aborted) return;
 
       if (events.length === 0) {
         setLeaderboard(buildMockLeaderboard(address));
@@ -322,12 +301,22 @@ export function useGovernance(): UseGovernanceReturn {
 
       setLeaderboard(records);
     } catch (err) {
+      if (isAbortError(err) || controller.signal.aborted) return;
       console.error('useGovernance: fetchLeaderboard failed', err);
       setLeaderboard(buildMockLeaderboard(address));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [address]);
+
+  // Cancel in-flight event fetches on unmount
+  useEffect(
+    () => () => {
+      leaderboardAbortRef.current?.abort();
+      activityAbortRef.current?.abort();
+    },
+    []
+  );
 
   // Initial fetch
   useEffect(() => {
@@ -357,43 +346,16 @@ export function useGovernance(): UseGovernanceReturn {
    */
   const fetchSignerActivity = useCallback(
     async (signerAddress: string, _page = 1): Promise<SignerActivity[]> => {
+      activityAbortRef.current?.abort();
+      const controller = new AbortController();
+      activityAbortRef.current = controller;
+
       setActivityLoading(true);
       try {
-        const latestRes = await fetch(env.sorobanRpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
+        const { events } = await fetchContractEvents({
+          lookbackLedgers: LOOKBACK_LEDGERS,
+          signal: controller.signal,
         });
-        const latestData = await latestRes.json() as { result?: { sequence?: number } };
-        const latestLedger = latestData?.result?.sequence ?? 0;
-        const startLedger = Math.max(1, latestLedger - 100000);
-
-        const evRes = await fetch(env.sorobanRpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 2,
-            method: 'getEvents',
-            params: {
-              startLedger: String(startLedger),
-              filters: [{ type: 'contract', contractIds: [env.contractId] }],
-              pagination: { limit: 200 },
-            },
-          }),
-        });
-        const evData = await evRes.json() as {
-          result?: {
-            events?: Array<{
-              id: string;
-              topic?: string[];
-              value?: { xdr?: string };
-              ledgerClosedAt?: string;
-            }>;
-          };
-        };
-
-        const events = evData.result?.events ?? [];
         const activities: SignerActivity[] = [];
 
         for (const ev of events) {
@@ -417,10 +379,11 @@ export function useGovernance(): UseGovernanceReturn {
         }
 
         return activities.slice(0, 20);
-      } catch {
+      } catch (err) {
+        if (isAbortError(err) || controller.signal.aborted) return [];
         return buildMockActivity(signerAddress);
       } finally {
-        setActivityLoading(false);
+        if (!controller.signal.aborted) setActivityLoading(false);
       }
     },
     []

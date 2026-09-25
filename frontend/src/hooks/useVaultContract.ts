@@ -49,6 +49,13 @@ import {
 } from '../utils/simulation';
 import { subscribeToLedgers } from '../utils/ledgerSubscription';
 import { newTransactionBuilder } from '../utils/transactionBuilder';
+import {
+    DEFAULT_EVENTS_PAGE_SIZE,
+    DEFAULT_LOOKBACK_LEDGERS,
+    fetchContractEvents,
+    fetchEventsPage,
+    getLatestLedgerSequence,
+} from '../utils/sorobanEvents';
 import { eventPayloadDigest } from '../utils/auditVerification';
 
 const EVENTS_PAGE_SIZE = 20;
@@ -159,12 +166,6 @@ interface SorobanGetEventsResponse {
   events: SorobanRpcEvent[];
   latestLedger: string;
   cursor?: string;
-}
-
-interface GetEventsParams {
-  startLedger?: string;
-  filters: Array<{ type: string; contractIds: string[] }>;
-  pagination: { limit: number; cursor?: string };
 }
 
 interface SorobanSimulationResult {
@@ -466,31 +467,7 @@ const [accountInfo, configResult, proposalsResult] = await Promise.allSettled([
     server.getAccount(env.contractId) as Promise<unknown>,
     readContractValue('get_config').catch(() => null).then(r =>
         r ?? readContractValue('get_vault_config').catch(() => null)),
-    // Inline event fetch to avoid forward-reference to getVaultEvents
-    (async () => {
-        const latestRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-        });
-        const latestData = await latestRes.json() as { result?: { sequence?: number } };
-        const latestLedger = latestData?.result?.sequence ?? 0;
-        const startLedger = Math.max(1, latestLedger - 50000);
-        const evRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                jsonrpc: '2.0', id: 2, method: 'getEvents',
-                params: {
-                    startLedger: String(startLedger),
-                    filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                    pagination: { limit: 200 },
-                },
-            }),
-        });
-        const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-        return evData.result?.events ?? [];
-    })(),
+    fetchContractEvents().then(({ events }) => events as RawEvent[]),
 ]);
 
 // --- Balance ---
@@ -907,32 +884,20 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
             return getDemoVaultEvents();
         }
         try {
-            const latestLedgerRes = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-            });
-            const latestLedgerData = await latestLedgerRes.json();
-            const latestLedger = latestLedgerData?.result?.sequence ?? '0';
-            const startLedger = cursor ? undefined : Math.max(1, parseInt(latestLedger, 10) - 50000);
-
-            const params: GetEventsParams = {
+            const pageLimit = Math.min(limit, DEFAULT_EVENTS_PAGE_SIZE);
+            const startLedger = cursor
+                ? undefined
+                : Math.max(1, (await getLatestLedgerSequence()) - DEFAULT_LOOKBACK_LEDGERS);
+            const page = await fetchEventsPage({
                 filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                pagination: { limit: Math.min(limit, 200) },
-            };
-            if (!cursor) params.startLedger = String(startLedger);
-            else params.pagination = { ...params.pagination, cursor };
-
-            const res = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getEvents', params }),
+                limit: pageLimit,
+                startLedger,
+                cursor,
             });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error.message || 'getEvents failed');
-            const events: RawEvent[] = data.result?.events ?? [];
-            const resultCursor = data.result?.cursor;
-            const hasMore = Boolean(resultCursor && events.length === limit);
+            const events = page.events as RawEvent[];
+            const resultCursor = page.cursor;
+            const hasMore = Boolean(resultCursor && events.length === pageLimit);
+            const latestLedger = String(page.latestLedger);
 
             const activities: VaultActivity[] = events.map(ev => {
                 const topic0 = ev.topic?.[0];
@@ -958,7 +923,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
                 };
             });
 
-            return { activities, latestLedger: data.result?.latestLedger ?? latestLedger, cursor: resultCursor, hasMore };
+            return { activities, latestLedger, cursor: resultCursor, hasMore };
         } catch (e) {
             console.error('getVaultEvents', e);
             return { activities: [], latestLedger: '0', hasMore: false };
@@ -1079,28 +1044,8 @@ const configObject = ((configRaw && typeof configRaw === 'object') ? configRaw :
 const allSigners = parseSignerAddresses(configObject.signers);
 
 // Fetch events to find approvals for this specific proposal
-const latestRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-});
-const latestData = await latestRes.json() as { result?: { sequence?: number } };
-const latestLedger = latestData?.result?.sequence ?? 0;
-const startLedger = Math.max(1, latestLedger - 50000);
-const evRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        jsonrpc: '2.0', id: 2, method: 'getEvents',
-        params: {
-            startLedger: String(startLedger),
-            filters: [{ type: 'contract', contractIds: [env.contractId] }],
-            pagination: { limit: 200 },
-        },
-    }),
-});
-const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-const events: RawEvent[] = evData.result?.events ?? [];
+const { events: fetchedEvents } = await fetchContractEvents();
+const events = fetchedEvents as RawEvent[];
 
 // Collect approvals for this proposal id
 const approvalMap = new Map<string, string>(); // address -> timestamp

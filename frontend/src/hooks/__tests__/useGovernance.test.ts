@@ -69,9 +69,9 @@ function mockRpcResponses(events: RpcEvent[]) {
   (global.fetch as Mock).mockImplementation(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(init.body as string) as { method: string };
     if (body.method === 'getLatestLedger') {
-      return { json: async () => ({ result: { sequence: 1000 } }) };
+      return { ok: true, status: 200, json: async () => ({ result: { sequence: 1000 } }) };
     }
-    return { json: async () => ({ result: { events } }) };
+    return { ok: true, status: 200, json: async () => ({ result: { events } }) };
   });
 }
 
@@ -144,7 +144,8 @@ describe('useGovernance', () => {
 
       const { result } = renderHook(() => useGovernance());
 
-      await waitFor(() => expect(result.current.loading).toBe(false));
+      // Transient failures are retried with backoff before falling back
+      await waitFor(() => expect(result.current.loading).toBe(false), { timeout: 5000 });
 
       expect(result.current.leaderboard).toHaveLength(5);
       // The hook swallows the error into a console.error + mock fallback;
