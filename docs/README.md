@@ -31,6 +31,7 @@ Hands-on how-tos for building and operating features.
 - [Expiration](guides/EXPIRATION_GUIDE.md)
 - [Approval timeout](guides/APPROVAL_TIMEOUT.md)
 - [Proposal supersession](guides/PROPOSAL_SUPERSESSION.md)
+- [Time-weighted voting](guides/TIME_WEIGHTED_VOTING.md)
 - [Treasury risk management](guides/TREASURY_RISK_MANAGEMENT.md)
 - [Advanced dashboard](guides/ADVANCED_DASHBOARD.md)
 - [Widget development](guides/WIDGET_DEVELOPMENT.md)
