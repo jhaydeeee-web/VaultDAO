@@ -402,9 +402,9 @@ mod test_disputes;
 #[cfg(test)]
 mod test_escrow_counterparty_acknowledgment;
 #[cfg(test)]
-mod test_escrow_milestone_verification_event;
-#[cfg(test)]
 mod test_escrow_dispute_filing_deadline;
+#[cfg(test)]
+mod test_escrow_milestone_verification_event;
 #[cfg(test)]
 mod test_fees;
 // #[cfg(test)]
@@ -458,21 +458,17 @@ mod test_streaming;
 // #[cfg(test)]
 // mod test_subscription_downgrade_grace;
 #[cfg(test)]
+mod test_cold_signature_age;
+#[cfg(test)]
 mod test_participation_scoring;
-#[cfg(test)]
-mod test_signers_with_roles;
-#[cfg(test)]
-mod test_threshold_min_init;
 #[cfg(test)]
 mod test_proposal_veto_event;
 #[cfg(test)]
-mod test_remove_signer_threshold;
-#[cfg(test)]
 mod test_recurring_payment_max_total_amount;
 #[cfg(test)]
-mod test_whitelist_proposal;
+mod test_remove_signer_threshold;
 #[cfg(test)]
-mod test_cold_signature_age;
+mod test_signers_with_roles;
 #[cfg(test)]
 mod test_subscriptions;
 #[cfg(test)]
@@ -481,24 +477,28 @@ mod test_supersession_chain;
 mod test_tag_taxonomy;
 #[cfg(test)]
 mod test_tags;
+#[cfg(test)]
+mod test_threshold_min_init;
+#[cfg(test)]
+mod test_whitelist_proposal;
 // #[cfg(test)]
 // mod test_threshold_reduction;
 #[cfg(test)]
+mod test_max_concurrent_streams_per_recipient;
+#[cfg(test)]
+mod test_stream_rate_window_clawback;
+#[cfg(test)]
 mod test_timelock_ready_queue;
+#[cfg(test)]
+mod test_treasurer_pause_recurring;
 #[cfg(test)]
 mod test_var_templates;
 #[cfg(test)]
 mod test_vault_template;
 #[cfg(test)]
-mod test_voting_deadline;
-#[cfg(test)]
-mod test_max_concurrent_streams_per_recipient;
-#[cfg(test)]
 mod test_velocity_history_authorization;
 #[cfg(test)]
-mod test_treasurer_pause_recurring;
-#[cfg(test)]
-mod test_stream_rate_window_clawback;
+mod test_voting_deadline;
 
 #[cfg(test)]
 pub mod mock_oracle {
@@ -5627,7 +5627,11 @@ impl VaultDAO {
     /// `remove_signer` call and the multisig `ProposalOperation::RemoveSigner`
     /// path (Issue #1526). Always rejects removals that would drop the
     /// signer count below the current threshold.
-    fn remove_signer_internal(env: &Env, actor: &Address, signer: &Address) -> Result<(), VaultError> {
+    fn remove_signer_internal(
+        env: &Env,
+        actor: &Address,
+        signer: &Address,
+    ) -> Result<(), VaultError> {
         let mut config = storage::get_config(env)?;
 
         let mut found_idx: Option<u32> = None;
@@ -9039,12 +9043,7 @@ impl VaultDAO {
     /// Return proposal IDs tagged with `tag_id` from the `HTagProposals` index,
     /// paginated (max 50 per page). Unlike `get_proposals_by_tag_id`, this does
     /// not include descendant tags.
-    pub fn get_tag_proposals_page(
-        env: Env,
-        tag_id: u64,
-        offset: u64,
-        limit: u32,
-    ) -> Vec<u64> {
+    pub fn get_tag_proposals_page(env: Env, tag_id: u64, offset: u64, limit: u32) -> Vec<u64> {
         const MAX_RESULTS: u32 = 50;
         let cap = if limit == 0 || limit > MAX_RESULTS {
             MAX_RESULTS

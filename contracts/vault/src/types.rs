@@ -2780,7 +2780,7 @@ impl ColdSignerConfig {
             cold_signers: Vec::new(env),
             cold_signer_addresses: Vec::new(env),
             cold_sig_threshold: 0,
-            cold_sig_expiry: 17280, // ~1 day at 5 s/ledger
+            cold_sig_expiry: 17280,            // ~1 day at 5 s/ledger
             max_cold_sig_age_ledgers: 120_960, // ~7 days at 5 s/ledger
         }
     }

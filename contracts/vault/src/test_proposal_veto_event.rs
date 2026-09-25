@@ -5,7 +5,9 @@
 #![cfg(test)]
 
 use super::*;
-use crate::types::{ConditionLogic, InitConfig, Priority, ThresholdStrategy, VelocityConfig, VoteWeight};
+use crate::types::{
+    ConditionLogic, InitConfig, Priority, ThresholdStrategy, VelocityConfig, VoteWeight,
+};
 use crate::{VaultDAO, VaultDAOClient};
 use soroban_sdk::{
     testutils::{Address as _, Events as _},
@@ -109,9 +111,7 @@ fn test_veto_emits_proposal_vetoed_event_with_correct_fields() {
         if !is_vetoed {
             return false;
         }
-        let topic_proposal_id = topics
-            .get(1)
-            .and_then(|t| u64::try_from_val(&env, &t).ok());
+        let topic_proposal_id = topics.get(1).and_then(|t| u64::try_from_val(&env, &t).ok());
         let event_vetoer = Address::try_from_val(&env, &data).ok();
         topic_proposal_id == Some(proposal_id) && event_vetoer == Some(vetoer.clone())
     });
