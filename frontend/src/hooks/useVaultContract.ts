@@ -120,7 +120,8 @@ interface StellarBalance {
 /** Known contract event names (topic[0] symbol) */
 const EVENT_SYMBOLS: VaultEventType[] = [
     'proposal_created', 'proposal_approved', 'proposal_ready', 'proposal_executed',
-    'proposal_rejected', 'signer_added', 'signer_removed', 'config_updated', 'initialized', 'role_assigned'
+    'proposal_rejected', 'signer_added', 'signer_removed', 'config_updated', 'initialized', 'role_assigned',
+    'vault_paused', 'vault_unpaused'
 ];
 
 function getEventTypeFromTopic(topic0Base64: string): VaultEventType {
@@ -202,6 +203,8 @@ interface ProposalEventData {
   threshold?: unknown;
   total_signers?: unknown;
   role?: unknown;
+  cause?: string;
+  pause_duration_ledgers?: string;
   parseError?: boolean;
   raw?: unknown;
 }
@@ -240,6 +243,10 @@ function parseEventValue(valueXdrBase64: string, eventType: VaultEventType): { a
                 details.total_signers = vec[1];
             } else if (eventType === 'role_assigned' && vec.length >= 2) {
                 details.role = vec[1];
+            } else if (eventType === 'vault_paused' && vec.length >= 2) {
+                details.cause = vec[1] != null ? String(vec[1]) : '';
+            } else if (eventType === 'vault_unpaused' && vec.length >= 2) {
+                details.pause_duration_ledgers = vec[1] != null ? String(vec[1]) : '';
             } else {
                 details.raw = native;
             }
