@@ -462,6 +462,8 @@ mod test_participation_scoring;
 #[cfg(test)]
 mod test_signers_with_roles;
 #[cfg(test)]
+mod test_recovery_role_revocation;
+#[cfg(test)]
 mod test_threshold_min_init;
 #[cfg(test)]
 mod test_proposal_veto_event;
@@ -13615,7 +13617,60 @@ impl VaultDAO {
 
         // Apply new configuration
         let mut config = storage::get_config(&env)?;
-        config.signers = proposal.new_signers.clone();
+        let old_signers = config.signers.clone();
+        let new_signers = proposal.new_signers.clone();
+
+        // ----------------------------------------------------------------
+        // Issue #1700: sync RBAC and delegation state with the signer swap.
+        // ----------------------------------------------------------------
+
+        // Determine which signers are being removed (present in old but not new).
+        let mut removed: Vec<Address> = Vec::new(&env);
+        for s in old_signers.iter() {
+            if !new_signers.contains(&s) {
+                removed.push_back(s);
+            }
+        }
+
+        // Determine which signers are genuinely new (present in new but not old).
+        let mut added: Vec<Address> = Vec::new(&env);
+        for s in new_signers.iter() {
+            if !old_signers.contains(&s) {
+                added.push_back(s);
+            }
+        }
+
+        // For every removed signer: clear their role entry and revoke both
+        // kinds of delegation (plain + scoped) that they may hold as delegator.
+        for signer in removed.iter() {
+            // 1. Clear the role so they can no longer satisfy Admin/Treasurer checks.
+            storage::remove_role(&env, &signer);
+
+            // 2. Revoke any active plain delegation they held.
+            let delegation = storage::get_delegation(&env, &signer);
+            if delegation.is_active {
+                storage::remove_delegation(&env, &signer);
+            }
+
+            // 3. Deactivate every scoped delegation they held as delegator.
+            let scoped_ids = storage::get_scoped_delegations_by_delegator(&env, &signer);
+            for id in scoped_ids.iter() {
+                if let Some(mut d) = storage::get_scoped_delegation(&env, id) {
+                    if d.is_active {
+                        d.is_active = false;
+                        storage::set_scoped_delegation(&env, &d);
+                    }
+                }
+            }
+        }
+
+        // For every genuinely new signer: grant them the Member role so they
+        // can participate in proposals immediately after recovery.
+        for signer in added.iter() {
+            storage::set_role(&env, &signer, Role::Member);
+        }
+
+        config.signers = new_signers;
         config.threshold = proposal.new_threshold;
         // Reset quorum and other fields to safe defaults if they were invalid for new signers
         if config.quorum > config.signers.len() {
