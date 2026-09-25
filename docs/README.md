@@ -32,6 +32,7 @@ Hands-on how-tos for building and operating features.
 - [Approval timeout](guides/APPROVAL_TIMEOUT.md)
 - [Proposal supersession](guides/PROPOSAL_SUPERSESSION.md)
 - [Treasury risk management](guides/TREASURY_RISK_MANAGEMENT.md)
+- [Governance config changes](guides/GOVERNANCE_CONFIG_CHANGES.md)
 - [Advanced dashboard](guides/ADVANCED_DASHBOARD.md)
 - [Widget development](guides/WIDGET_DEVELOPMENT.md)
 
