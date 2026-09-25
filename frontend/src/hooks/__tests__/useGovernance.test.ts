@@ -1,24 +1,31 @@
 /**
  * Tests for useGovernance hook.
  *
- * useGovernance derives a signer leaderboard (vote tallies, participation
- * rate, and a weighted reputation score) from on-chain contract events, plus
- * per-signer activity history. Covers:
- *  - Fallback to mock leaderboard data when the RPC has no events, or fails
- *  - Vote tallying and reputation-score ("vote weight") computation from
- *    aggregated approve/abstain/create events
- *  - Threshold-style branches: recognized vs. unrecognized event symbols,
- *    decode failures, and the "no signer stats" fallback
- *  - Leaderboard sorting across every filter field and order
- *  - Signer activity fetching, its own mock fallback, and loading flag
+ * useGovernance builds the signer leaderboard from on-chain contract reads
+ * (get_signers_with_roles, get_reputation, get_participation_score) and
+ * per-signer activity from fully paginated contract events. Covers:
+ *  - Mapping contract reputation/participation data to leaderboard records
+ *  - Empty state (no mock data) outside demo mode, and error surfacing
+ *  - Mock data served only when env.demoMode is enabled
+ *  - Leaderboard sorting across filter fields and orders
+ *  - Signer activity filtering, ordering and paging
  *  - refetch(), the 60s polling interval, and the websocket-driven refresh
  */
 
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach, type Mock } from 'vitest';
-import { useGovernance, roleFromNumber } from '../useGovernance';
+import {
+  useGovernance,
+  roleFromNumber,
+  roleFromContract,
+  recentHistory,
+  ledgerToIso,
+  buildSignerRecord,
+} from '../useGovernance';
 import { useWallet } from '../useWallet';
 import { useRealtime } from '../../contexts/RealtimeContext';
+import { readContract, fetchAllContractEvents, fetchLatestLedger } from '../../utils/contractRead';
+import { env } from '../../config/env';
 
 vi.mock('../useWallet', () => ({
   useWallet: vi.fn(),
@@ -28,17 +35,26 @@ vi.mock('../../contexts/RealtimeContext', () => ({
   useRealtime: vi.fn(),
 }));
 
-// `getEventSymbol`/`getActorFromValue` in the hook round-trip values through
-// `xdr.ScVal.fromXDR` and `scValToNative`. Rather than construct real XDR, we
-// mock both to a simple string convention so tests can drive every branch:
-//   "sym:<name>"      -> decodes to the symbol string <name>
-//   "actor:<addr>"    -> decodes to an array whose first element is <addr>
-//   "actorobj:<addr>" -> decodes to an array whose first element is {address}
-//   "throw"           -> decoding throws, exercising the catch branches
+vi.mock('../../utils/contractRead', () => ({
+  readContract: vi.fn(),
+  fetchAllContractEvents: vi.fn(),
+  fetchLatestLedger: vi.fn(),
+}));
+
+// Decode helpers use a simple string convention instead of real XDR:
+//   "sym:<name>"   -> the symbol string <name>
+//   "actor:<addr>" -> an array whose first element is <addr>
+// Address is stubbed so tests can use short fake account IDs.
 vi.mock('stellar-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('stellar-sdk')>();
   return {
     ...actual,
+    Address: class {
+      constructor(public addr: string) {}
+      toScVal() {
+        return this.addr;
+      }
+    },
     xdr: {
       ...actual.xdr,
       ScVal: {
@@ -48,38 +64,34 @@ vi.mock('stellar-sdk', async (importOriginal) => {
     },
     scValToNative: vi.fn((raw: unknown) => {
       if (typeof raw !== 'string') return raw;
-      if (raw === 'throw') throw new Error('decode failure');
       if (raw.startsWith('sym:')) return raw.slice(4);
       if (raw.startsWith('actor:')) return [raw.slice(6)];
-      if (raw.startsWith('actorobj:')) return [{ address: raw.slice(9) }];
-      if (raw.startsWith('actorstr:')) return raw.slice(9);
       return raw;
     }),
   };
 });
 
-type RpcEvent = {
-  id: string;
-  topic?: string[];
-  value?: { xdr?: string };
-  ledgerClosedAt?: string;
+const CONNECTED_ADDRESS = 'GSELF';
+const LATEST_LEDGER = 1_000_000;
+
+type SignerFixture = {
+  role: number;
+  reputation?: Record<string, unknown> | null;
+  participation?: Record<string, unknown> | null;
 };
 
-function mockRpcResponses(events: RpcEvent[]) {
-  (global.fetch as Mock).mockImplementation(async (_url: string, init: RequestInit) => {
-    const body = JSON.parse(init.body as string) as { method: string };
-    if (body.method === 'getLatestLedger') {
-      return { json: async () => ({ result: { sequence: 1000 } }) };
+function mockVault(signers: Record<string, SignerFixture>) {
+  (readContract as Mock).mockImplementation(async (fn: string, args: unknown[] = []) => {
+    if (fn === 'get_signers_with_roles') {
+      return Object.entries(signers).map(([addr, s]) => [addr, s.role]);
     }
-    return { json: async () => ({ result: { events } }) };
+    const addr = String(args[0]);
+    const signer = signers[addr];
+    if (fn === 'get_reputation') return signer?.reputation ?? null;
+    if (fn === 'get_participation_score') return signer?.participation ?? null;
+    throw new Error(`unexpected call ${fn}`);
   });
 }
-
-function mockRpcFailure() {
-  (global.fetch as Mock).mockRejectedValue(new Error('network down'));
-}
-
-const CONNECTED_ADDRESS = 'GSELF0000000000000000000000000000000000000000000000000000';
 
 describe('useGovernance', () => {
   let mockSubscribe: Mock;
@@ -88,6 +100,7 @@ describe('useGovernance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    (env as { demoMode?: boolean }).demoMode = false;
 
     (useWallet as Mock).mockReturnValue({ address: CONNECTED_ADDRESS });
 
@@ -98,414 +111,337 @@ describe('useGovernance', () => {
     });
     (useRealtime as Mock).mockReturnValue({ subscribe: mockSubscribe });
 
-    global.fetch = vi.fn();
-    mockRpcResponses([]);
+    (fetchLatestLedger as Mock).mockResolvedValue(LATEST_LEDGER);
+    (fetchAllContractEvents as Mock).mockResolvedValue([]);
+    mockVault({});
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    (env as { demoMode?: boolean }).demoMode = false;
   });
 
-  describe('roleFromNumber', () => {
-    it('maps 2 to Admin, 1 to Treasurer, and anything else to Member', () => {
+  describe('helpers', () => {
+    it('roleFromNumber keeps its legacy mapping', () => {
       expect(roleFromNumber(2)).toBe('Admin');
       expect(roleFromNumber(1)).toBe('Treasurer');
       expect(roleFromNumber(0)).toBe('Member');
-      expect(roleFromNumber(99)).toBe('Member');
+    });
+
+    it('roleFromContract maps the contract Role enum', () => {
+      expect(roleFromContract(3)).toBe('Admin');
+      expect(roleFromContract(2)).toBe('Treasurer');
+      expect(roleFromContract(1)).toBe('Member');
+      expect(roleFromContract(0)).toBe('Member');
+      expect(roleFromContract(4)).toBe('Member');
+    });
+
+    it('recentHistory returns the tail of a partial buffer', () => {
+      const h = [true, false, true, true];
+      expect(recentHistory(h, 0, 3)).toEqual([false, true, true]);
+    });
+
+    it('recentHistory unrolls a full circular buffer from the cursor', () => {
+      // 100 entries; newest write went to index 4, so oldest is at cursor 5.
+      const h = Array.from({ length: 100 }, (_, i) => i < 5);
+      const tail = recentHistory(h, 5, 10);
+      expect(tail).toEqual([false, false, false, false, false, true, true, true, true, true]);
+    });
+
+    it('ledgerToIso estimates time from ledger distance', () => {
+      const now = Date.UTC(2026, 0, 1);
+      expect(ledgerToIso(990, 1000, now)).toBe(new Date(now - 50_000).toISOString());
+      expect(ledgerToIso(0, 1000, now)).toBe(new Date(0).toISOString());
+    });
+
+    it('buildSignerRecord handles missing contract data', () => {
+      const r = buildSignerRecord('GX', 1, null, null, 100);
+      expect(r).toMatchObject({
+        approvalsGiven: 0,
+        abstentions: 0,
+        proposalsCreated: 0,
+        participationRate: 0,
+        reputationScore: 0,
+        voteHistory: [],
+      });
     });
   });
 
-  describe('mock data fallback', () => {
-    it('falls back to mock leaderboard when no events are returned', async () => {
-      mockRpcResponses([]);
+  describe('leaderboard from contract state', () => {
+    it('maps reputation and participation per signer', async () => {
+      mockVault({
+        GALICE: {
+          role: 3,
+          reputation: {
+            score: 720,
+            approvals_given: 40,
+            abstentions_given: 5,
+            proposals_created: 12n,
+            last_participation_ledger: 999_000n,
+          },
+          participation: {
+            proposals_voted: 45,
+            proposals_missed: 5,
+            last_active_ledger: 999_990,
+            history: [true, false, true],
+            history_cursor: 0,
+          },
+        },
+        GBOB: {
+          role: 2,
+          reputation: { score: 5000, approvals_given: 1 },
+          participation: { proposals_voted: 0, proposals_missed: 0, history: [] },
+        },
+      });
 
       const { result } = renderHook(() => useGovernance());
-
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      expect(result.current.leaderboard).toHaveLength(5);
-      expect(result.current.leaderboard[0].address).toBeDefined();
+      const alice = result.current.leaderboard.find((r) => r.address === 'GALICE')!;
+      expect(alice.role).toBe('Admin');
+      expect(alice.approvalsGiven).toBe(40);
+      expect(alice.abstentions).toBe(5);
+      expect(alice.proposalsCreated).toBe(12);
+      expect(alice.participationRate).toBeCloseTo(0.9);
+      expect(alice.reputationScore).toBe(720);
+      expect(alice.voteHistory).toEqual([true, false, true]);
+      // lastActive derived from the more recent of the two ledgers (10 ledgers ago)
+      const ageMs = Date.now() - new Date(alice.lastActive).getTime();
+      expect(ageMs).toBeGreaterThanOrEqual(49_000);
+      expect(ageMs).toBeLessThan(60_000);
+
+      const bob = result.current.leaderboard.find((r) => r.address === 'GBOB')!;
+      expect(bob.role).toBe('Treasurer');
+      expect(bob.reputationScore).toBe(1000); // clamped
+      expect(bob.participationRate).toBe(0);
+
       expect(result.current.error).toBeNull();
     });
 
-    it('uses the connected wallet address for the first mock record', async () => {
-      mockRpcResponses([]);
+    it('queries reputation and participation for every signer', async () => {
+      mockVault({ GA: { role: 1 }, GB: { role: 1 }, GC: { role: 1 } });
 
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      expect(
-        result.current.leaderboard.some((r) => r.address === CONNECTED_ADDRESS),
-      ).toBe(true);
+      const calls = (readContract as Mock).mock.calls.map((c) => `${c[0]}:${String(c[1]?.[0] ?? '')}`);
+      for (const addr of ['GA', 'GB', 'GC']) {
+        expect(calls).toContain(`get_reputation:${addr}`);
+        expect(calls).toContain(`get_participation_score:${addr}`);
+      }
+      expect(fetchAllContractEvents).not.toHaveBeenCalled();
     });
 
-    it('falls back to mock leaderboard when the RPC call throws', async () => {
-      mockRpcFailure();
-
-      const { result } = renderHook(() => useGovernance());
-
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      expect(result.current.leaderboard).toHaveLength(5);
-      // The hook swallows the error into a console.error + mock fallback;
-      // it never actually populates `error`.
-      expect(result.current.error).toBeNull();
-    });
-
-    it('falls back to mock leaderboard when events exist but none are recognized signer events', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:unknown_event'], value: { xdr: 'actor:GXXX' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: '2', topic: undefined },
-      ]);
+    it('still lists a signer when one of its per-signer reads fails', async () => {
+      mockVault({ GA: { role: 1, reputation: { score: 600 } } });
+      const base = (readContract as Mock).getMockImplementation()!;
+      (readContract as Mock).mockImplementation(async (fn: string, args: unknown[]) => {
+        if (fn === 'get_participation_score') throw new Error('boom');
+        return base(fn, args);
+      });
 
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      expect(result.current.leaderboard).toHaveLength(5);
+      expect(result.current.leaderboard).toHaveLength(1);
+      expect(result.current.leaderboard[0].reputationScore).toBe(600);
     });
   });
 
-  describe('vote tallying and reputation scoring', () => {
-    it('aggregates approvals, abstentions, and proposals-created per signer', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: '2', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-02T00:00:00Z' },
-        { id: '3', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-03T00:00:00Z' },
-        { id: '4', topic: ['sym:proposal_abstained'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-04T00:00:00Z' },
-        { id: '5', topic: ['sym:proposal_created'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-05T00:00:00Z' },
-        { id: '6', topic: ['sym:proposal_created'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-06T00:00:00Z' },
-        { id: '7', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GBOB' }, ledgerClosedAt: '2026-01-07T00:00:00Z' },
-      ]);
-
+  describe('empty state and demo mode', () => {
+    it('returns an empty leaderboard (no mock data) when the vault has no signers', async () => {
+      mockVault({});
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      const alice = result.current.leaderboard.find((r) => r.address === 'GALICE');
-      const bob = result.current.leaderboard.find((r) => r.address === 'GBOB');
-
-      expect(alice).toBeDefined();
-      expect(alice!.approvalsGiven).toBe(3);
-      expect(alice!.abstentions).toBe(1);
-      expect(alice!.proposalsCreated).toBe(2);
-      expect(alice!.participationRate).toBe(0.75); // 3 approvals / 4 total votes
-      // score = round(3*6 + 0.75*300 + 2*10) = round(18 + 225 + 20) = 263
-      expect(alice!.reputationScore).toBe(263);
-      expect(alice!.lastActive).toBe('2026-01-06T00:00:00Z');
-
-      expect(bob).toBeDefined();
-      expect(bob!.approvalsGiven).toBe(1);
-      expect(bob!.participationRate).toBe(1);
-      // score = round(1*6 + 1*300 + 0) = 306
-      expect(bob!.reputationScore).toBe(306);
+      expect(result.current.leaderboard).toEqual([]);
+      expect(result.current.error).toBeNull();
     });
 
-    it('caps the reputation score at 1000', async () => {
-      const events: RpcEvent[] = Array.from({ length: 200 }, (_, i) => ({
-        id: String(i),
-        topic: ['sym:proposal_approved'],
-        value: { xdr: 'actor:GWHALE' },
-        ledgerClosedAt: '2026-01-01T00:00:00Z',
-      }));
-      mockRpcResponses(events);
-
+    it('surfaces an error and an empty leaderboard when the contract read fails', async () => {
+      (readContract as Mock).mockRejectedValue(new Error('rpc down'));
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      const whale = result.current.leaderboard.find((r) => r.address === 'GWHALE');
-      expect(whale!.reputationScore).toBe(1000);
+      expect(result.current.leaderboard).toEqual([]);
+      expect(result.current.error).toBe('rpc down');
     });
 
-    it('registers signers from signer_added and role_assigned events with zero stats', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:signer_added'], value: { xdr: 'actor:GNEW' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: '2', topic: ['sym:role_assigned'], value: { xdr: 'actor:GNEW2' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
+    it('serves mock leaderboard data only in demo mode', async () => {
+      (env as { demoMode?: boolean }).demoMode = true;
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      const newSigner = result.current.leaderboard.find((r) => r.address === 'GNEW');
-      expect(newSigner).toBeDefined();
-      expect(newSigner!.approvalsGiven).toBe(0);
-      expect(newSigner!.reputationScore).toBe(0);
-    });
-
-    it('ignores events with a recognized symbol but no resolvable actor', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:proposal_approved'], value: undefined, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      // No signer stats produced -> falls back to mock leaderboard.
       expect(result.current.leaderboard).toHaveLength(5);
-    });
-
-    it('resolves an actor represented as an object with an address field', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:proposal_approved'], value: { xdr: 'actorobj:GOBJ' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      expect(result.current.leaderboard.find((r) => r.address === 'GOBJ')).toBeDefined();
-    });
-
-    it('resolves an actor represented as a bare (non-array) string', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:proposal_approved'], value: { xdr: 'actorstr:GPLAIN' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      expect(result.current.leaderboard.find((r) => r.address === 'GPLAIN')).toBeDefined();
-    });
-
-    it('skips events whose topic or value fails to decode', async () => {
-      mockRpcResponses([
-        { id: '1', topic: ['throw'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: '2', topic: ['sym:proposal_approved'], value: { xdr: 'throw' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      // Both events fail to yield a usable signer -> mock fallback.
-      expect(result.current.leaderboard).toHaveLength(5);
+      expect(result.current.leaderboard.some((r) => r.address === CONNECTED_ADDRESS)).toBe(true);
+      expect(readContract).not.toHaveBeenCalled();
     });
   });
 
   describe('leaderboard sorting', () => {
-    async function setup() {
-      mockRpcResponses([
-        { id: '1', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: '2', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-05T00:00:00Z' },
-        { id: '3', topic: ['sym:proposal_created'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-05T00:00:00Z' },
-        { id: '4', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GBOB' }, ledgerClosedAt: '2026-01-03T00:00:00Z' },
-        { id: '5', topic: ['sym:proposal_created'], value: { xdr: 'actor:GCARL' }, ledgerClosedAt: '2026-01-02T00:00:00Z' },
-      ]);
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-      return result;
-    }
-
-    it('sorts by reputationScore descending by default', async () => {
-      const result = await setup();
-      const scores = result.current.leaderboard.map((r) => r.reputationScore);
-      expect(scores).toEqual([...scores].sort((a, b) => b - a));
+    beforeEach(() => {
+      mockVault({
+        GA: { role: 1, reputation: { score: 300, approvals_given: 9, proposals_created: 1 }, participation: { proposals_voted: 1, proposals_missed: 1, last_active_ledger: LATEST_LEDGER - 100 } },
+        GB: { role: 1, reputation: { score: 900, approvals_given: 2, proposals_created: 5 }, participation: { proposals_voted: 1, proposals_missed: 0, last_active_ledger: LATEST_LEDGER - 10 } },
+        GC: { role: 1, reputation: { score: 600, approvals_given: 5, proposals_created: 3 }, participation: { proposals_voted: 1, proposals_missed: 3, last_active_ledger: LATEST_LEDGER - 1000 } },
+      });
     });
 
-    it('sorts by approvalsGiven ascending when requested', async () => {
-      const result = await setup();
+    it('sorts by reputationScore descending by default', async () => {
+      const { result } = renderHook(() => useGovernance());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.leaderboard.map((r) => r.address)).toEqual(['GB', 'GC', 'GA']);
+    });
 
-      act(() => {
-        result.current.setFilters({ sortBy: 'approvalsGiven', order: 'asc' });
-      });
-
-      const approvals = result.current.leaderboard.map((r) => r.approvalsGiven);
-      expect(approvals).toEqual([...approvals].sort((a, b) => a - b));
+    it('sorts by approvalsGiven ascending', async () => {
+      const { result } = renderHook(() => useGovernance());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => result.current.setFilters({ sortBy: 'approvalsGiven', order: 'asc' }));
+      expect(result.current.leaderboard.map((r) => r.address)).toEqual(['GB', 'GC', 'GA']);
     });
 
     it('sorts by participationRate descending', async () => {
-      const result = await setup();
-
-      act(() => {
-        result.current.setFilters({ sortBy: 'participationRate', order: 'desc' });
-      });
-
-      const rates = result.current.leaderboard.map((r) => r.participationRate);
-      expect(rates).toEqual([...rates].sort((a, b) => b - a));
+      const { result } = renderHook(() => useGovernance());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => result.current.setFilters({ sortBy: 'participationRate', order: 'desc' }));
+      expect(result.current.leaderboard.map((r) => r.address)).toEqual(['GB', 'GA', 'GC']);
     });
 
-    it('sorts by proposalsCreated ascending', async () => {
-      const result = await setup();
-
-      act(() => {
-        result.current.setFilters({ sortBy: 'proposalsCreated', order: 'asc' });
-      });
-
-      const created = result.current.leaderboard.map((r) => r.proposalsCreated);
-      expect(created).toEqual([...created].sort((a, b) => a - b));
-    });
-
-    it('sorts by lastActive using timestamp comparison, both orders', async () => {
-      const result = await setup();
-
-      act(() => {
-        result.current.setFilters({ sortBy: 'lastActive', order: 'asc' });
-      });
-      const asc = result.current.leaderboard.map((r) => r.lastActive);
-      expect(asc).toEqual([...asc].sort());
-
-      act(() => {
-        result.current.setFilters({ sortBy: 'lastActive', order: 'desc' });
-      });
-      const desc = result.current.leaderboard.map((r) => r.lastActive);
-      expect(desc).toEqual([...asc].reverse());
+    it('sorts by lastActive in both orders', async () => {
+      const { result } = renderHook(() => useGovernance());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => result.current.setFilters({ sortBy: 'lastActive', order: 'desc' }));
+      expect(result.current.leaderboard.map((r) => r.address)).toEqual(['GB', 'GA', 'GC']);
+      act(() => result.current.setFilters({ sortBy: 'lastActive', order: 'asc' }));
+      expect(result.current.leaderboard.map((r) => r.address)).toEqual(['GC', 'GA', 'GB']);
     });
   });
 
   describe('fetchSignerActivity', () => {
-    it('returns matching activity events for the requested signer', async () => {
-      mockRpcResponses([]);
-      const { result } = renderHook(() => useGovernance());
-      await waitFor(() => expect(result.current.loading).toBe(false));
-
-      mockRpcResponses([
-        { id: 'a1', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-        { id: 'a2', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GBOB' }, ledgerClosedAt: '2026-01-02T00:00:00Z' },
+    it('returns the signer events newest first from the paginated event feed', async () => {
+      (fetchAllContractEvents as Mock).mockResolvedValue([
+        { id: 'a', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GALICE' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
+        { id: 'b', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GBOB' }, ledgerClosedAt: '2026-01-02T00:00:00Z' },
+        { id: 'c', topic: ['sym:proposal_created'], value: 'actor:GALICE', ledgerClosedAt: '2026-01-03T00:00:00Z' },
+        { id: 'd', topic: undefined },
       ]);
 
-      let activity;
-      await act(async () => {
-        activity = await result.current.fetchSignerActivity('GALICE');
-      });
-
-      expect(activity).toHaveLength(1);
-      expect(activity![0].id).toBe('a1');
-      expect(activity![0].type).toBe('proposal_approved');
-    });
-
-    it('caps activity results at 20 entries', async () => {
-      mockRpcResponses([]);
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      const many: RpcEvent[] = Array.from({ length: 30 }, (_, i) => ({
-        id: `e${i}`,
-        topic: ['sym:proposal_approved'],
-        value: { xdr: 'actor:GALICE' },
-        ledgerClosedAt: '2026-01-01T00:00:00Z',
-      }));
-      mockRpcResponses(many);
-
-      let activity;
+      let activity: Awaited<ReturnType<typeof result.current.fetchSignerActivity>> = [];
       await act(async () => {
         activity = await result.current.fetchSignerActivity('GALICE');
       });
 
-      expect(activity).toHaveLength(20);
+      expect(activity.map((a) => a.id)).toEqual(['c', 'a']);
+      expect(activity[0].type).toBe('proposal_created');
+      expect(fetchAllContractEvents).toHaveBeenCalledWith({ startLedger: LATEST_LEDGER - 120_960 });
     });
 
-    it('falls back to mock activity when no events match the signer', async () => {
-      mockRpcResponses([]);
+    it('pages results 20 at a time', async () => {
+      (fetchAllContractEvents as Mock).mockResolvedValue(
+        Array.from({ length: 25 }, (_, i) => ({
+          id: `e${i}`,
+          topic: ['sym:proposal_approved'],
+          value: { xdr: 'actor:GALICE' },
+          ledgerClosedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+        })),
+      );
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      mockRpcResponses([
-        { id: 'a1', topic: ['sym:proposal_approved'], value: { xdr: 'actor:GBOB' }, ledgerClosedAt: '2026-01-01T00:00:00Z' },
-      ]);
-
-      let activity;
+      let p1: unknown[] = [];
+      let p2: unknown[] = [];
       await act(async () => {
-        activity = await result.current.fetchSignerActivity('GALICE');
+        p1 = await result.current.fetchSignerActivity('GALICE', 1);
+        p2 = await result.current.fetchSignerActivity('GALICE', 2);
       });
-
-      expect(activity!.length).toBeGreaterThan(0);
-      expect(activity![0].id).toBe('1'); // buildMockActivity's fixed id
+      expect(p1).toHaveLength(20);
+      expect(p2).toHaveLength(5);
     });
 
-    it('falls back to mock activity when the RPC call throws', async () => {
-      mockRpcResponses([]);
+    it('returns an empty list (no mock data) when nothing matches or the RPC fails', async () => {
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      mockRpcFailure();
-
-      let activity;
+      let empty: unknown[] = ['x'];
       await act(async () => {
-        activity = await result.current.fetchSignerActivity('GALICE');
+        empty = await result.current.fetchSignerActivity('GNOBODY');
       });
+      expect(empty).toEqual([]);
 
-      expect(activity!.length).toBeGreaterThan(0);
+      (fetchAllContractEvents as Mock).mockRejectedValue(new Error('down'));
+      let failed: unknown[] = ['x'];
+      await act(async () => {
+        failed = await result.current.fetchSignerActivity('GALICE');
+      });
+      expect(failed).toEqual([]);
       expect(result.current.activityLoading).toBe(false);
     });
 
-    it('toggles activityLoading around the fetch', async () => {
-      mockRpcResponses([]);
+    it('serves mock activity in demo mode', async () => {
+      (env as { demoMode?: boolean }).demoMode = true;
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
 
-      expect(result.current.activityLoading).toBe(false);
-
-      let promise: Promise<unknown>;
-      act(() => {
-        promise = result.current.fetchSignerActivity('GALICE');
-      });
-      expect(result.current.activityLoading).toBe(true);
-
+      let activity: unknown[] = [];
       await act(async () => {
-        await promise;
+        activity = await result.current.fetchSignerActivity('GALICE');
       });
-      expect(result.current.activityLoading).toBe(false);
+      expect(activity.length).toBeGreaterThan(0);
+      expect(fetchAllContractEvents).not.toHaveBeenCalled();
     });
   });
 
   describe('refresh triggers', () => {
-    it('refetch() re-runs the leaderboard fetch', async () => {
-      mockRpcResponses([]);
+    it('refetch() re-reads the signer list', async () => {
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
-
-      const callsBefore = (global.fetch as Mock).mock.calls.length;
+      const before = (readContract as Mock).mock.calls.length;
 
       await act(async () => {
         await result.current.refetch();
       });
 
-      expect((global.fetch as Mock).mock.calls.length).toBeGreaterThan(callsBefore);
+      expect((readContract as Mock).mock.calls.length).toBeGreaterThan(before);
     });
 
     it('refreshes automatically every 60 seconds', async () => {
       vi.useFakeTimers();
-      mockRpcResponses([]);
-
       const { result } = renderHook(() => useGovernance());
-
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(result.current.loading).toBe(false);
-
-      const callsBefore = (global.fetch as Mock).mock.calls.length;
+      const before = (readContract as Mock).mock.calls.length;
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(60_000);
       });
 
-      expect((global.fetch as Mock).mock.calls.length).toBeGreaterThan(callsBefore);
+      expect((readContract as Mock).mock.calls.length).toBeGreaterThan(before);
     });
 
-    it('subscribes to proposal_approved and refetches when the event fires', async () => {
-      mockRpcResponses([]);
+    it('refetches when a proposal_approved websocket event fires', async () => {
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
-
       expect(mockSubscribe).toHaveBeenCalledWith('proposal_approved', expect.any(Function));
-
-      const callsBefore = (global.fetch as Mock).mock.calls.length;
+      const before = (readContract as Mock).mock.calls.length;
 
       await act(async () => {
         capturedHandlers['proposal_approved']({});
       });
 
       await waitFor(() =>
-        expect((global.fetch as Mock).mock.calls.length).toBeGreaterThan(callsBefore),
+        expect((readContract as Mock).mock.calls.length).toBeGreaterThan(before),
       );
     });
 
     it('clears the refresh interval on unmount', async () => {
       const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
-      mockRpcResponses([]);
-
       const { unmount } = renderHook(() => useGovernance());
-      await waitFor(() => expect(clearIntervalSpy).not.toHaveBeenCalled());
-
       unmount();
-
       expect(clearIntervalSpy).toHaveBeenCalled();
       clearIntervalSpy.mockRestore();
     });
