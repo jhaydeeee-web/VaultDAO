@@ -164,3 +164,7 @@ Reports that follow this policy will be treated as authorized security research 
 VaultDAO has not yet completed a formal third-party security audit. Users should treat the project as beta software and avoid depositing significant funds until audits, fixes, and deployment guidance mature.
 
 For current attack-surface notes, invariants, and known findings, read [`../AUDIT_SCOPE.md`](../AUDIT_SCOPE.md).
+
+## Configuration Authority
+
+Operators should know which vault parameters require a signer supermajority and which a single Admin can change directly. [`../guides/GOVERNANCE_CONFIG_CHANGES.md`](../guides/GOVERNANCE_CONFIG_CHANGES.md) documents `set_governance_threshold`, `propose_config_change`, `approve_config_change` and `execute_config_change`, lists every config parameter with its required authority, and calls out the known paths where a direct Admin setter bypasses governance. Reports showing such a bypass beyond the ones already listed there are in scope under "Governance bypasses" above.

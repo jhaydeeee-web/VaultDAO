@@ -1150,6 +1150,23 @@ pub fn emit_recovery_executed(env: &Env, proposal_id: u64) {
         .publish((Symbol::new(env, "recovery_executed"), proposal_id), ());
 }
 
+/// Emit when in-flight proposals are invalidated because the signer set changed
+/// through a recovery execution. `affected_ids` contains every proposal whose
+/// approval slate was wiped and whose status was reset to Pending.
+pub fn emit_proposals_invalidated_by_recovery(
+    env: &Env,
+    recovery_proposal_id: u64,
+    affected_ids: Vec<u64>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "proposals_invalidated"),
+            recovery_proposal_id,
+        ),
+        affected_ids,
+    );
+}
+
 /// Emit when a recovery proposal is cancelled
 pub fn emit_recovery_cancelled(env: &Env, proposal_id: u64, canceller: &Address) {
     env.events().publish(

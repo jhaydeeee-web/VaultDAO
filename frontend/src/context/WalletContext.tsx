@@ -120,7 +120,13 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         const available = await adapter.isAvailable();
         if (!cancelled && available) {
           activeAdapterRef.current = adapter;
-          await updateWalletState(adapter);
+          const reconnected = await updateWalletState(adapter);
+          // updateWalletState swallows adapter errors; if the reconnect didn't
+          // take, drop the persisted flag so we don't retry on every load.
+          if (!reconnected && !cancelled && activeAdapterRef.current === adapter) {
+            activeAdapterRef.current = null;
+            localStorage.removeItem(WALLET_CONNECTED_KEY);
+          }
         } else if (!cancelled) {
           // Stored wallet no longer available — clear persisted state silently
           localStorage.removeItem(WALLET_CONNECTED_KEY);

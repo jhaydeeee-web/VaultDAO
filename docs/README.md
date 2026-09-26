@@ -34,6 +34,7 @@ Hands-on how-tos for building and operating features.
 - [Time-weighted voting](guides/TIME_WEIGHTED_VOTING.md)
 - [Token vesting](guides/VESTING.md)
 - [Treasury risk management](guides/TREASURY_RISK_MANAGEMENT.md)
+- [Governance config changes](guides/GOVERNANCE_CONFIG_CHANGES.md)
 - [Advanced dashboard](guides/ADVANCED_DASHBOARD.md)
 - [Widget development](guides/WIDGET_DEVELOPMENT.md)
 

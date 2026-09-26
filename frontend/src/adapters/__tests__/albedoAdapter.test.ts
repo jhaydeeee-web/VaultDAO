@@ -16,8 +16,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Mock @albedo-link/intent before importing the adapter so the replacement
 // takes effect at module load time.
 // ---------------------------------------------------------------------------
-const mockPublicKey = vi.fn();
-const mockTx = vi.fn();
+const { mockPublicKey, mockTx } = vi.hoisted(() => ({
+  mockPublicKey: vi.fn(),
+  mockTx: vi.fn(),
+}));
 
 vi.mock('@albedo-link/intent', () => ({
   default: {
@@ -31,10 +33,8 @@ vi.mock('@albedo-link/intent', () => ({
 // time by resetting the module registry between tests.
 // ---------------------------------------------------------------------------
 async function freshAdapter() {
+  // The top-level vi.mock factory is re-applied after resetModules().
   vi.resetModules();
-  vi.mock('@albedo-link/intent', () => ({
-    default: { publicKey: mockPublicKey, tx: mockTx },
-  }));
   const mod = await import('../albedoAdapter');
   return mod.albedoAdapter;
 }

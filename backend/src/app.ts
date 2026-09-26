@@ -53,7 +53,12 @@ import { createRequestLogger } from "./shared/http/requestLogger.js";
 import { createRequestContextMiddleware } from "./shared/http/requestContext.js";
 import { createErrorMiddleware } from "./shared/errors/handleError.js";
 import { CorsAllowlist } from "./shared/http/corsAllowlist.js";
-import { initFeatureFlags, getFeatureFlags } from "./shared/feature-flags.js";
+import {
+  initFeatureFlags,
+  getFeatureFlags,
+  isKnownFlag,
+  KNOWN_FLAGS,
+} from "./shared/feature-flags.js";
 import { initRpcPool } from "./shared/rpc-pool.js";
 import { createDrainMiddleware } from "./shared/http/drain.js";
 import { createLogger } from "./shared/logging/logger.js";
@@ -418,14 +423,23 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     success(res, getFeatureFlags().list());
   });
 
+  const rejectUnknownFlag = (res: express.Response, flag: string) =>
+    error(res, {
+      message: `Unknown feature flag "${flag}". Known flags: ${KNOWN_FLAGS.join(", ")}`,
+      status: 404,
+      code: ErrorCode.NOT_FOUND,
+    });
+
   v1Router.post("/admin/features/:flag/enable", adminAuthMiddleware, hmacMiddleware, (req, res) => {
     const { flag } = req.params as { flag: string };
+    if (!isKnownFlag(flag)) return rejectUnknownFlag(res, flag);
     getFeatureFlags().enable(flag);
     success(res, { flag, enabled: true });
   });
 
   v1Router.post("/admin/features/:flag/disable", adminAuthMiddleware, hmacMiddleware, (req, res) => {
     const { flag } = req.params as { flag: string };
+    if (!isKnownFlag(flag)) return rejectUnknownFlag(res, flag);
     getFeatureFlags().disable(flag);
     success(res, { flag, enabled: false });
   });
