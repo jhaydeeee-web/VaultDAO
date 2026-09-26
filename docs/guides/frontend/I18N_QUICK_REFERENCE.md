@@ -81,7 +81,7 @@ const className = isRTL() ? 'flex-row-reverse' : 'flex-row';
 
 ## 🔧 Adding New Translations
 
-1. Add to `src/translations/en.json`:
+1. Add to `public/locales/en/translation.json`:
 ```json
 {
   "myFeature": {
@@ -178,7 +178,7 @@ const { t } = useTranslation();
 ## 📚 Files to Know
 
 - **Config**: `src/i18n.ts`
-- **Translations**: `src/translations/*.json`
+- **Translations**: `public/locales/<lng>/translation.json`
 - **Component**: `src/components/LanguageSwitcher.tsx`
 - **Utilities**: `src/utils/localeFormatter.ts`
 - **Guide**: [I18N_IMPLEMENTATION_GUIDE.md](./I18N_IMPLEMENTATION_GUIDE.md)

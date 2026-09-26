@@ -3,6 +3,21 @@ import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 import HttpBackend from 'i18next-http-backend';
 
+export const SUPPORTED_LANGUAGES = ['en', 'es', 'fr', 'ar', 'zh', 'zh-TW'] as const;
+
+// Chinese variants that should resolve to Traditional Chinese rather than 'zh'.
+const TRADITIONAL_CHINESE = /^zh[-_](hant|tw|hk|mo)\b/i;
+
+/**
+ * Map a detected language tag to one of SUPPORTED_LANGUAGES.
+ * Supported regional locales (e.g. zh-TW) are kept intact; other region
+ * codes fall back to their base language (en-US -> en).
+ */
+export function normalizeLanguage(lng: string): string {
+  const exact = SUPPORTED_LANGUAGES.find((l) => l.toLowerCase() === lng.replace('_', '-').toLowerCase());
+  if (exact) return exact;
+  if (TRADITIONAL_CHINESE.test(lng)) return 'zh-TW';
+  return lng.split(/[-_]/)[0];
 export const SUPPORTED_LANGUAGES = ['en', 'es', 'fr', 'ar', 'zh', 'zh-TW'];
 
 /**
@@ -22,6 +37,7 @@ i18n
   .use(initReactI18next)
   .init({
     fallbackLng: 'en',
+    supportedLngs: [...SUPPORTED_LANGUAGES],
     supportedLngs: SUPPORTED_LANGUAGES,
     ns: ['translation'],
     defaultNS: 'translation',
@@ -40,6 +56,7 @@ i18n
       order: ['localStorage', 'navigator'],
       caches: ['localStorage'],
       lookupLocalStorage: 'i18nextLng',
+      convertDetectedLanguage: normalizeLanguage,
       convertDetectedLanguage: normalizeDetectedLanguage,
     },
   });

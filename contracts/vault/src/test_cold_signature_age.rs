@@ -81,8 +81,7 @@ fn test_future_dated_signature_rejected() {
     let current = env.ledger().sequence();
     let signature = BytesN::from_array(&env, &[2u8; 64]);
 
-    let result =
-        client.try_submit_cold_signature(&0u64, &signature, &pubkey, &(current + 100));
+    let result = client.try_submit_cold_signature(&0u64, &signature, &pubkey, &(current + 100));
     assert_eq!(result, Err(Ok(VaultError::ColdSignatureFutureDated)));
 }
 

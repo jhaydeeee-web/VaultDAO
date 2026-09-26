@@ -10,6 +10,8 @@ vi.mock('../config/env', () => ({
     horizonUrl: 'https://horizon-testnet.stellar.org',
     stellarNetwork: 'TESTNET',
     explorerUrl: 'https://stellar.expert/explorer/testnet',
+    feeMultiplier: 1.5,
+    maxBaseFee: 100000,
   },
 }));
 

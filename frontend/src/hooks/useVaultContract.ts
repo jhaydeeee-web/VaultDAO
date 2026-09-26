@@ -48,6 +48,14 @@ import {
     formatFeeBreakdown,
 } from '../utils/simulation';
 import { subscribeToLedgers } from '../utils/ledgerSubscription';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
+import {
+    DEFAULT_EVENTS_PAGE_SIZE,
+    DEFAULT_LOOKBACK_LEDGERS,
+    fetchContractEvents,
+    fetchEventsPage,
+    getLatestLedgerSequence,
+} from '../utils/sorobanEvents';
 import { eventPayloadDigest } from '../utils/auditVerification';
 import {
     clearLegacyCancelledRecurring,
@@ -165,12 +173,6 @@ interface SorobanGetEventsResponse {
   events: SorobanRpcEvent[];
   latestLedger: string;
   cursor?: string;
-}
-
-interface GetEventsParams {
-  startLedger?: string;
-  filters: Array<{ type: string; contractIds: string[] }>;
-  pagination: { limit: number; cursor?: string };
 }
 
 interface SorobanSimulationResult {
@@ -424,9 +426,7 @@ export const useVaultContract = () => {
             console.warn(`Failed to load account for read operation (${source}):`, error);
             throw new Error(`Unable to perform read operation: invalid source account (${source})`);
         }
-        const tx = new TransactionBuilder(account, { fee: "100" })
-            .setNetworkPassphrase(env.networkPassphrase)
-            .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
             .addOperation(Operation.invokeHostFunction({
                 func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                     new xdr.InvokeContractArgs({
@@ -529,31 +529,7 @@ const [accountInfo, configResult, proposalsResult] = await Promise.allSettled([
     server.getAccount(env.contractId) as Promise<unknown>,
     readContractValue('get_config').catch(() => null).then(r =>
         r ?? readContractValue('get_vault_config').catch(() => null)),
-    // Inline event fetch to avoid forward-reference to getVaultEvents
-    (async () => {
-        const latestRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-        });
-        const latestData = await latestRes.json() as { result?: { sequence?: number } };
-        const latestLedger = latestData?.result?.sequence ?? 0;
-        const startLedger = Math.max(1, latestLedger - 50000);
-        const evRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                jsonrpc: '2.0', id: 2, method: 'getEvents',
-                params: {
-                    startLedger: String(startLedger),
-                    filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                    pagination: { limit: 200 },
-                },
-            }),
-        });
-        const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-        return evData.result?.events ?? [];
-    })(),
+    fetchContractEvents().then(({ events }) => events as RawEvent[]),
 ]);
 
 // --- Balance ---
@@ -701,9 +677,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -743,9 +717,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -778,9 +750,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -813,9 +783,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -854,6 +822,25 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         const _addr = assertReady();
         setLoading(true);
         try {
+            const account = await server.getAccount(_addr);
+            const tx = (await newTransactionBuilder(account))
+                .addOperation(Operation.invokeHostFunction({
+                    func: xdr.HostFunction.hostFunctionTypeInvokeContract(
+                        new xdr.InvokeContractArgs({
+                            contractAddress: Address.fromString(env.contractId).toScAddress(),
+                            functionName: "add_signer",
+                            args: [new Address(_addr).toScVal(), new Address(signer).toScVal()],
+                        })
+                    ),
+                    auth: [],
+                }))
+                .build();
+            const simulation = await server.simulateTransaction(tx);
+            if (SorobanRpc.Api.isSimulationError(simulation)) throwSimulationError(simulation.error, "Simulation failed");
+            const preparedTx = SorobanRpc.assembleTransaction(tx, simulation).build();
+            const signedXdr = await signTransaction(preparedTx.toXDR(), { network: env.stellarNetwork });
+            const response = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr as string, env.networkPassphrase));
+            return response.hash;
             const currentConfig = await readContractScVal('get_config');
             if (!currentConfig) throw new Error('Unable to load current vault config');
             const newConfig = buildConfigWithAddedSigner(currentConfig, new Address(signer).toScVal());
@@ -873,9 +860,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -905,9 +890,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -937,9 +920,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -978,32 +959,20 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
             return getDemoVaultEvents();
         }
         try {
-            const latestLedgerRes = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-            });
-            const latestLedgerData = await latestLedgerRes.json();
-            const latestLedger = latestLedgerData?.result?.sequence ?? '0';
-            const startLedger = cursor ? undefined : Math.max(1, parseInt(latestLedger, 10) - 50000);
-
-            const params: GetEventsParams = {
+            const pageLimit = Math.min(limit, DEFAULT_EVENTS_PAGE_SIZE);
+            const startLedger = cursor
+                ? undefined
+                : Math.max(1, (await getLatestLedgerSequence()) - DEFAULT_LOOKBACK_LEDGERS);
+            const page = await fetchEventsPage({
                 filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                pagination: { limit: Math.min(limit, 200) },
-            };
-            if (!cursor) params.startLedger = String(startLedger);
-            else params.pagination = { ...params.pagination, cursor };
-
-            const res = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getEvents', params }),
+                limit: pageLimit,
+                startLedger,
+                cursor,
             });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error.message || 'getEvents failed');
-            const events: RawEvent[] = data.result?.events ?? [];
-            const resultCursor = data.result?.cursor;
-            const hasMore = Boolean(resultCursor && events.length === limit);
+            const events = page.events as RawEvent[];
+            const resultCursor = page.cursor;
+            const hasMore = Boolean(resultCursor && events.length === pageLimit);
+            const latestLedger = String(page.latestLedger);
 
             const activities: VaultActivity[] = events.map(ev => {
                 const topic0 = ev.topic?.[0];
@@ -1029,7 +998,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
                 };
             });
 
-            return { activities, latestLedger: data.result?.latestLedger ?? latestLedger, cursor: resultCursor, hasMore };
+            return { activities, latestLedger, cursor: resultCursor, hasMore };
         } catch (e) {
             console.error('getVaultEvents', e);
             return { activities: [], latestLedger: '0', hasMore: false };
@@ -1070,9 +1039,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
 
         try {
             const account = await server.getAccount(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1152,28 +1119,8 @@ const configObject = ((configRaw && typeof configRaw === 'object') ? configRaw :
 const allSigners = parseSignerAddresses(configObject.signers);
 
 // Fetch events to find approvals for this specific proposal
-const latestRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-});
-const latestData = await latestRes.json() as { result?: { sequence?: number } };
-const latestLedger = latestData?.result?.sequence ?? 0;
-const startLedger = Math.max(1, latestLedger - 50000);
-const evRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        jsonrpc: '2.0', id: 2, method: 'getEvents',
-        params: {
-            startLedger: String(startLedger),
-            filters: [{ type: 'contract', contractIds: [env.contractId] }],
-            pagination: { limit: 200 },
-        },
-    }),
-});
-const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-const events: RawEvent[] = evData.result?.events ?? [];
+const { events: fetchedEvents } = await fetchContractEvents();
+const events = fetchedEvents as RawEvent[];
 
 // Collect approvals for this proposal id
 const approvalMap = new Map<string, string>(); // address -> timestamp
@@ -1401,9 +1348,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const source = address ?? env.contractId;
             const account = await server.getAccount(source);
             const vaultAddress = Address.fromString(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1447,9 +1392,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const account = await server.getAccount(source);
             const contractAddr = Address.fromString(tokenAddress).toScAddress();
 
-            const buildTx = (fn: string) => new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const buildTx = async (fn: string) => (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({ contractAddress: contractAddr, functionName: fn, args: [] })
@@ -1459,7 +1402,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
                 .build();
 
             const parseResult = async (fn: string): Promise<unknown> => {
-                const sim = await server.simulateTransaction(buildTx(fn));
+                const sim = await server.simulateTransaction(await buildTx(fn));
                 if (SorobanRpc.Api.isSimulationError(sim)) return null;
                 const retval = (sim as { result?: { retval?: unknown } })?.result?.retval;
                 if (retval == null) return null;
@@ -1650,9 +1593,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
                 const tokenAddress = params.token === 'native'
                     ? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC' // XLM SAC on testnet
                     : params.token;
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1689,9 +1630,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1754,9 +1693,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: "100" })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1799,9 +1736,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
                 setLoading(true);
                 try {
                     const account = await server.getAccount(_addr);
-                    const tx = new TransactionBuilder(account, { fee: "100" })
-                        .setNetworkPassphrase(env.networkPassphrase)
-                        .setTimeout(30)
+                    const tx = (await newTransactionBuilder(account))
                         .addOperation(Operation.invokeHostFunction({
                             func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                                 new xdr.InvokeContractArgs({

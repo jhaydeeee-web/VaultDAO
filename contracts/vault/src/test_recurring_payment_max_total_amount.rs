@@ -100,7 +100,7 @@ fn test_create_recurring_payment_with_max_total_amount() {
             &token,
             &100i128,
             &Symbol::new(&env, "test"),
-            &1000u64, // interval
+            &1000u64,         // interval
             &Some(1_000i128), // max_total_amount
         )
         .expect("create_recurring_payment should succeed");
@@ -221,11 +221,13 @@ fn test_payment_halts_at_max_total_amount() {
     // This payment should be rejected or halted
     let result = client.execute_recurring_payment(&payment_id);
     // Should fail because cap is reached
-    assert!(result.is_err() || {
-        // Or status might be Stopped, let's verify
-        let payment = client.get_recurring_payment(&payment_id).ok();
-        payment.map(|p| p.payment_count == 2).unwrap_or(false)
-    });
+    assert!(
+        result.is_err() || {
+            // Or status might be Stopped, let's verify
+            let payment = client.get_recurring_payment(&payment_id).ok();
+            payment.map(|p| p.payment_count == 2).unwrap_or(false)
+        }
+    );
 }
 
 // ============================================================================
