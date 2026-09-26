@@ -7,7 +7,7 @@
  * is enabled.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   xdr,
   Address,
@@ -20,6 +20,8 @@ import { useWallet } from './useWallet';
 import { env } from '../config/env';
 import { parseError } from '../utils/errorParser';
 import { readContract, fetchLatestLedger } from '../utils/contractRead';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
+import { fetchContractEvents, isAbortError } from '../utils/sorobanEvents';
 import type { Escrow, EscrowStatus, Milestone, MilestoneStatus, EscrowDispute } from '../types/escrow';
 
 const server = new SorobanRpc.Server(env.sorobanRpcUrl);
@@ -253,7 +255,13 @@ export function useEscrow(): UseEscrowReturn {
    * Mock data is only used in demo mode; otherwise an empty list is returned
    * when the wallet has no escrows and failures surface through `error`.
    */
+  const fetchAbortRef = useRef<AbortController | null>(null);
+
   const fetchEscrows = useCallback(async () => {
+    fetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     setLoading(true);
     setError(null);
     if (env.demoMode) {
@@ -290,6 +298,24 @@ export function useEscrow(): UseEscrowReturn {
           loaded.push(mapContractEscrow(r.value as ContractEscrow, latestLedger));
         } else if (r.status === 'rejected') {
           console.warn(`useEscrow: failed to load escrow ${ids[i]}`, r.reason);
+      // Attempt to fetch from Soroban events
+      const { events } = await fetchContractEvents({
+        lookbackLedgers: 100_000,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+
+      // Filter escrow-related events
+      const escrowEvents = events.filter((ev) => {
+        const topic0 = ev.topic?.[0];
+        if (!topic0) return false;
+        try {
+          const { scValToNative } = require('stellar-sdk');
+          const scv = xdr.ScVal.fromXDR(topic0, 'base64');
+          const native = scValToNative(scv);
+          return typeof native === 'string' && native.startsWith('escrow');
+        } catch {
+          return false;
         }
       });
 
@@ -298,17 +324,21 @@ export function useEscrow(): UseEscrowReturn {
         setError('Failed to load escrow details');
       }
     } catch (err) {
+      if (isAbortError(err) || controller.signal.aborted) return;
       console.error('useEscrow: fetchEscrows failed', err);
       setEscrows([]);
       setError(err instanceof Error ? err.message : 'Failed to load escrows');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [address]);
 
   useEffect(() => {
     void fetchEscrows();
   }, [fetchEscrows]);
+
+  // Cancel any in-flight event fetch on unmount
+  useEffect(() => () => fetchAbortRef.current?.abort(), []);
 
   /**
    * Call the contract's verify_milestone function.
@@ -321,9 +351,7 @@ export function useEscrow(): UseEscrowReturn {
       setVerifyingMilestone(key);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(
@@ -392,9 +420,7 @@ export function useEscrow(): UseEscrowReturn {
       setRaisingDispute(escrowId);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(

@@ -21,6 +21,7 @@ Complete reference for the VaultDAO Soroban smart contract public surface.
 - [Metadata & Tags](#metadata--tags)
 - [Attachments](#attachments)
 - [Insurance & Staking](#insurance--staking)
+- [Token Vesting](#token-vesting)
 - [Dynamic Fees](#dynamic-fees)
 - [View Functions](#view-functions)
 - [Multi-Phase Proposals](#multi-phase-proposals)
@@ -761,6 +762,62 @@ Update staking configuration (admin only).
 ### `withdraw_stake_pool(admin: Address, token: Address, recipient: Address, amount: i128) -> Result<(), VaultError>`
 
 Withdraw slashed stake funds (admin only).
+
+---
+
+## Token Vesting
+
+Linear token vesting with an optional cliff. All ledger arguments are **absolute ledger sequence numbers** (~5 s per ledger). See the [Vesting guide](../guides/VESTING.md) for the lifecycle, math and worked examples.
+
+### `create_vesting_schedule(admin: Address, beneficiary: Address, token_addr: Address, total: i128, cliff_ledger: u32, start_ledger: u32, end_ledger: u32) -> Result<u64, VaultError>`
+
+Reserve `total` of the vault's `token_addr` balance for `beneficiary`, vesting linearly from `start_ledger` to `end_ledger`, with nothing claimable before `cliff_ledger` (Admin only — role must be exactly `Admin`).
+
+**Constraints:**
+- `total > 0`
+- `start_ledger ≤ cliff_ledger < end_ledger`
+- At most **100 active schedules** vault-wide (active = not fully claimed and not cancelled)
+- Unreserved vault balance of `token_addr` (balance − amount reserved by other schedules) ≥ `total`
+
+**Returns:** New schedule ID (IDs start at 1)
+
+**Events:** `vesting_created`
+
+**Errors:** `Unauthorized`, `InvalidAmount`, `BatchTooLarge` (cap reached), `InsufficientBalance`
+
+---
+
+### `claim_vested_tokens(beneficiary: Address, schedule_id: u64) -> Result<i128, VaultError>`
+
+Transfer everything vested but not yet claimed to the beneficiary.
+
+**Vested amount:** `0` before `cliff_ledger`; `total` at/after `end_ledger`; otherwise `total × (now − start_ledger) / (end_ledger − start_ledger)` (truncating).
+
+**Returns:** Amount transferred. Returns `0` (and emits no event) when nothing is claimable.
+
+**Events:** `vesting_claimed`
+
+**Errors:** `ProposalNotFound` (unknown schedule), `Unauthorized` (caller is not the beneficiary, or schedule cancelled), `InvalidAmount` (arithmetic overflow)
+
+---
+
+### `cancel_vesting(admin: Address, schedule_id: u64) -> Result<i128, VaultError>`
+
+Stop a schedule (Admin only — role must be exactly `Admin`). Any vested-but-unclaimed amount is paid to the beneficiary immediately; the unvested remainder is released back to the treasury.
+
+**Returns:** Unvested amount released. Returns `0` (no event) if the schedule was already cancelled or fully claimed.
+
+**Events:** `vesting_cancelled`
+
+**Errors:** `Unauthorized`, `ProposalNotFound`, `InvalidAmount`
+
+---
+
+### `get_vesting_schedule(schedule_id: u64) -> Option<VestingSchedule>`
+
+Fetch a vesting schedule by ID (read-only).
+
+**Returns:** `VestingSchedule { id, beneficiary, token, total, cliff_ledger, start_ledger, end_ledger, claimed, cancelled }`, or `None`
 
 ---
 

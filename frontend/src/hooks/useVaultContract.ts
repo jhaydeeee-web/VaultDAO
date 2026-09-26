@@ -48,7 +48,21 @@ import {
     formatFeeBreakdown,
 } from '../utils/simulation';
 import { subscribeToLedgers } from '../utils/ledgerSubscription';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
+import {
+    DEFAULT_EVENTS_PAGE_SIZE,
+    DEFAULT_LOOKBACK_LEDGERS,
+    fetchContractEvents,
+    fetchEventsPage,
+    getLatestLedgerSequence,
+} from '../utils/sorobanEvents';
 import { eventPayloadDigest } from '../utils/auditVerification';
+import {
+    clearLegacyCancelledRecurring,
+    fetchAllRecurringPayments,
+    mapRecurringStatus,
+} from '../utils/recurringPayments';
+import { buildConfigWithAddedSigner } from '../utils/configChange';
 
 const EVENTS_PAGE_SIZE = 20;
 
@@ -120,7 +134,8 @@ interface StellarBalance {
 /** Known contract event names (topic[0] symbol) */
 const EVENT_SYMBOLS: VaultEventType[] = [
     'proposal_created', 'proposal_approved', 'proposal_ready', 'proposal_executed',
-    'proposal_rejected', 'signer_added', 'signer_removed', 'config_updated', 'initialized', 'role_assigned'
+    'proposal_rejected', 'signer_added', 'signer_removed', 'config_updated', 'initialized', 'role_assigned',
+    'vault_paused', 'vault_unpaused'
 ];
 
 function getEventTypeFromTopic(topic0Base64: string): VaultEventType {
@@ -160,12 +175,6 @@ interface SorobanGetEventsResponse {
   cursor?: string;
 }
 
-interface GetEventsParams {
-  startLedger?: string;
-  filters: Array<{ type: string; contractIds: string[] }>;
-  pagination: { limit: number; cursor?: string };
-}
-
 interface SorobanSimulationResult {
   result?: {
     retval: xdr.ScVal;
@@ -202,6 +211,8 @@ interface ProposalEventData {
   threshold?: unknown;
   total_signers?: unknown;
   role?: unknown;
+  cause?: string;
+  pause_duration_ledgers?: string;
   parseError?: boolean;
   raw?: unknown;
 }
@@ -240,6 +251,10 @@ function parseEventValue(valueXdrBase64: string, eventType: VaultEventType): { a
                 details.total_signers = vec[1];
             } else if (eventType === 'role_assigned' && vec.length >= 2) {
                 details.role = vec[1];
+            } else if (eventType === 'vault_paused' && vec.length >= 2) {
+                details.cause = vec[1] != null ? String(vec[1]) : '';
+            } else if (eventType === 'vault_unpaused' && vec.length >= 2) {
+                details.pause_duration_ledgers = vec[1] != null ? String(vec[1]) : '';
             } else {
                 details.raw = native;
             }
@@ -402,7 +417,7 @@ export const useVaultContract = () => {
         return () => subscription.close();
     }, []);
 
-    const readContractValue = useCallback(async (functionName: string, args: xdr.ScVal[] = []): Promise<unknown> => {
+    const readContractScVal = useCallback(async (functionName: string, args: xdr.ScVal[] = []): Promise<xdr.ScVal | null> => {
         const source = address ?? env.feesAccount;
         let account;
         try {
@@ -411,9 +426,7 @@ export const useVaultContract = () => {
             console.warn(`Failed to load account for read operation (${source}):`, error);
             throw new Error(`Unable to perform read operation: invalid source account (${source})`);
         }
-        const tx = new TransactionBuilder(account, { fee: "100" })
-            .setNetworkPassphrase(env.networkPassphrase)
-            .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
             .addOperation(Operation.invokeHostFunction({
                 func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                     new xdr.InvokeContractArgs({
@@ -434,17 +447,66 @@ export const useVaultContract = () => {
         if (retval == null) return null;
         if (typeof retval === 'string') {
             try {
-                return scValToNative(xdr.ScVal.fromXDR(retval, 'base64'));
+                return xdr.ScVal.fromXDR(retval, 'base64');
             } catch {
                 return null;
             }
         }
+        return retval as xdr.ScVal;
+    }, [address]);
+
+    const readContractValue = useCallback(async (functionName: string, args: xdr.ScVal[] = []): Promise<unknown> => {
+        const scVal = await readContractScVal(functionName, args);
+        if (scVal == null) return null;
         try {
-            return scValToNative(retval as xdr.ScVal);
+            return scValToNative(scVal);
         } catch {
             return null;
         }
-    }, [address]);
+    }, [readContractScVal]);
+
+    /** Simulate, sign and submit a contract call from the connected wallet. */
+    const invokeContract = async (functionName: string, args: xdr.ScVal[]): Promise<string> => {
+        const _addr = assertReady();
+        const account = await server.getAccount(_addr);
+        const tx = new TransactionBuilder(account, { fee: "100" })
+            .setNetworkPassphrase(env.networkPassphrase)
+            .setTimeout(30)
+            .addOperation(Operation.invokeHostFunction({
+                func: xdr.HostFunction.hostFunctionTypeInvokeContract(
+                    new xdr.InvokeContractArgs({
+                        contractAddress: Address.fromString(env.contractId).toScAddress(),
+                        functionName,
+                        args,
+                    })
+                ),
+                auth: [],
+            }))
+            .build();
+        const simulation = await server.simulateTransaction(tx);
+        if (SorobanRpc.Api.isSimulationError(simulation)) throwSimulationError(simulation.error, "Simulation failed");
+        const preparedTx = SorobanRpc.assembleTransaction(tx, simulation).build();
+        const signedXdr = await signTransaction(preparedTx.toXDR(), { network: env.stellarNetwork });
+        const response = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr as string, env.networkPassphrase));
+        return response.hash;
+    };
+
+    /** Call a `(caller, payment_id)` recurring-payment status mutation on-chain. */
+    const updateRecurringPayment = async (functionName: string, paymentId?: string): Promise<string> => {
+        const _addr = assertReady();
+        if (!paymentId) throw new Error('Payment ID required');
+        setLoading(true);
+        try {
+            return await invokeContract(functionName, [
+                new Address(_addr).toScVal(),
+                nativeToScVal(BigInt(paymentId), { type: 'u64' }),
+            ]);
+        } catch (e: unknown) {
+            throw parseError(e);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     const getUserRole = useCallback(async (): Promise<number> => {
         if (!address) return 0;
@@ -467,31 +529,7 @@ const [accountInfo, configResult, proposalsResult] = await Promise.allSettled([
     server.getAccount(env.contractId) as Promise<unknown>,
     readContractValue('get_config').catch(() => null).then(r =>
         r ?? readContractValue('get_vault_config').catch(() => null)),
-    // Inline event fetch to avoid forward-reference to getVaultEvents
-    (async () => {
-        const latestRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-        });
-        const latestData = await latestRes.json() as { result?: { sequence?: number } };
-        const latestLedger = latestData?.result?.sequence ?? 0;
-        const startLedger = Math.max(1, latestLedger - 50000);
-        const evRes = await fetch(env.sorobanRpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                jsonrpc: '2.0', id: 2, method: 'getEvents',
-                params: {
-                    startLedger: String(startLedger),
-                    filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                    pagination: { limit: 200 },
-                },
-            }),
-        });
-        const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-        return evData.result?.events ?? [];
-    })(),
+    fetchContractEvents().then(({ events }) => events as RawEvent[]),
 ]);
 
 // --- Balance ---
@@ -639,9 +677,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -681,9 +717,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -716,9 +750,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -751,9 +783,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -782,14 +812,18 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         }
     };
 
+    /**
+     * The contract has no direct `add_signer`; signer changes go through
+     * governance. This submits a `propose_vault_config_change` proposal with
+     * the current on-chain config plus the new signer. The signer is added once
+     * that proposal is approved and executed.
+     */
     const addSigner = async (signer: string) => {
         const _addr = assertReady();
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -807,6 +841,13 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
             const signedXdr = await signTransaction(preparedTx.toXDR(), { network: env.stellarNetwork });
             const response = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr as string, env.networkPassphrase));
             return response.hash;
+            const currentConfig = await readContractScVal('get_config');
+            if (!currentConfig) throw new Error('Unable to load current vault config');
+            const newConfig = buildConfigWithAddedSigner(currentConfig, new Address(signer).toScVal());
+            return await invokeContract('propose_vault_config_change', [
+                new Address(_addr).toScVal(),
+                newConfig,
+            ]);
         } catch (e: unknown) {
             throw parseError(e);
         } finally {
@@ -819,9 +860,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -851,9 +890,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -883,9 +920,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
         setLoading(true);
         try {
             const account = await server.getAccount(_addr);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -924,32 +959,20 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
             return getDemoVaultEvents();
         }
         try {
-            const latestLedgerRes = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-            });
-            const latestLedgerData = await latestLedgerRes.json();
-            const latestLedger = latestLedgerData?.result?.sequence ?? '0';
-            const startLedger = cursor ? undefined : Math.max(1, parseInt(latestLedger, 10) - 50000);
-
-            const params: GetEventsParams = {
+            const pageLimit = Math.min(limit, DEFAULT_EVENTS_PAGE_SIZE);
+            const startLedger = cursor
+                ? undefined
+                : Math.max(1, (await getLatestLedgerSequence()) - DEFAULT_LOOKBACK_LEDGERS);
+            const page = await fetchEventsPage({
                 filters: [{ type: 'contract', contractIds: [env.contractId] }],
-                pagination: { limit: Math.min(limit, 200) },
-            };
-            if (!cursor) params.startLedger = String(startLedger);
-            else params.pagination = { ...params.pagination, cursor };
-
-            const res = await fetch(env.sorobanRpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getEvents', params }),
+                limit: pageLimit,
+                startLedger,
+                cursor,
             });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error.message || 'getEvents failed');
-            const events: RawEvent[] = data.result?.events ?? [];
-            const resultCursor = data.result?.cursor;
-            const hasMore = Boolean(resultCursor && events.length === limit);
+            const events = page.events as RawEvent[];
+            const resultCursor = page.cursor;
+            const hasMore = Boolean(resultCursor && events.length === pageLimit);
+            const latestLedger = String(page.latestLedger);
 
             const activities: VaultActivity[] = events.map(ev => {
                 const topic0 = ev.topic?.[0];
@@ -975,7 +998,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
                 };
             });
 
-            return { activities, latestLedger: data.result?.latestLedger ?? latestLedger, cursor: resultCursor, hasMore };
+            return { activities, latestLedger, cursor: resultCursor, hasMore };
         } catch (e) {
             console.error('getVaultEvents', e);
             return { activities: [], latestLedger: '0', hasMore: false };
@@ -1016,9 +1039,7 @@ return { totalBalance: balance, totalProposals, pendingApprovals, readyToExecute
 
         try {
             const account = await server.getAccount(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: "100" })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1098,28 +1119,8 @@ const configObject = ((configRaw && typeof configRaw === 'object') ? configRaw :
 const allSigners = parseSignerAddresses(configObject.signers);
 
 // Fetch events to find approvals for this specific proposal
-const latestRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
-});
-const latestData = await latestRes.json() as { result?: { sequence?: number } };
-const latestLedger = latestData?.result?.sequence ?? 0;
-const startLedger = Math.max(1, latestLedger - 50000);
-const evRes = await fetch(env.sorobanRpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        jsonrpc: '2.0', id: 2, method: 'getEvents',
-        params: {
-            startLedger: String(startLedger),
-            filters: [{ type: 'contract', contractIds: [env.contractId] }],
-            pagination: { limit: 200 },
-        },
-    }),
-});
-const evData = await evRes.json() as { result?: { events?: RawEvent[] } };
-const events: RawEvent[] = evData.result?.events ?? [];
+const { events: fetchedEvents } = await fetchContractEvents();
+const events = fetchedEvents as RawEvent[];
 
 // Collect approvals for this proposal id
 const approvalMap = new Map<string, string>(); // address -> timestamp
@@ -1347,9 +1348,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const source = address ?? env.contractId;
             const account = await server.getAccount(source);
             const vaultAddress = Address.fromString(env.contractId);
-            const tx = new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const tx = (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({
@@ -1393,9 +1392,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
             const account = await server.getAccount(source);
             const contractAddr = Address.fromString(tokenAddress).toScAddress();
 
-            const buildTx = (fn: string) => new TransactionBuilder(account, { fee: '100' })
-                .setNetworkPassphrase(env.networkPassphrase)
-                .setTimeout(30)
+            const buildTx = async (fn: string) => (await newTransactionBuilder(account))
                 .addOperation(Operation.invokeHostFunction({
                     func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                         new xdr.InvokeContractArgs({ contractAddress: contractAddr, functionName: fn, args: [] })
@@ -1405,7 +1402,7 @@ const exportSignatures = useCallback(async (proposalId: number) => {
                 .build();
 
             const parseResult = async (fn: string): Promise<unknown> => {
-                const sim = await server.simulateTransaction(buildTx(fn));
+                const sim = await server.simulateTransaction(await buildTx(fn));
                 if (SorobanRpc.Api.isSimulationError(sim)) return null;
                 const retval = (sim as { result?: { retval?: unknown } })?.result?.retval;
                 if (retval == null) return null;
@@ -1535,75 +1532,43 @@ const exportSignatures = useCallback(async (proposalId: number) => {
         addCustomToken,
         getVaultBalance,
         getRecurringPayments: async (): Promise<RecurringPayment[]> => {
-            // Probe recurring payment IDs 1..N from contract storage.
-            // Also merge any locally-cancelled IDs from localStorage.
-            const cancelledKey = `vault_cancelled_recurring_${env.contractId}`;
-            let cancelledIds: string[] = [];
-            try { cancelledIds = JSON.parse(localStorage.getItem(cancelledKey) ?? '[]'); } catch { /* ignore */ }
-            const cancelledSet = new Set(cancelledIds);
+            // Status comes solely from on-chain RecurringStatus; drop the
+            // obsolete client-side cancellation list from older versions.
+            clearLegacyCancelledRecurring(env.contractId);
 
-            const payments: RecurringPayment[] = [];
             const LEDGER_INTERVAL_S = 5;
             const now = Date.now();
 
-            // Fetch the next recurring ID to know the upper bound
-            let maxId = 0;
-            try {
-                const nextId = await readContractValue('get_next_recurring_id').catch(() => null);
-                maxId = nextId != null ? Math.max(0, parseNumericValue(nextId) - 1) : 0;
-            } catch { /* ignore */ }
+            const [rawPayments, currentLedger] = await Promise.all([
+                fetchAllRecurringPayments((offset, limit) =>
+                    readContractValue('list_recurring_payments', [
+                        nativeToScVal(BigInt(offset), { type: 'u64' }),
+                        nativeToScVal(BigInt(limit), { type: 'u64' }),
+                    ])
+                ),
+                server.getLatestLedger().then((l) => l.sequence).catch(() => 0),
+            ]);
 
-            // Fetch each payment by ID (up to 50 to avoid excessive calls)
-            const ids = Array.from({ length: Math.min(maxId, 50) }, (_, i) => i + 1);
-            const results = await Promise.allSettled(
-                ids.map(id => readContractValue('get_recurring_payment', [nativeToScVal(BigInt(id), { type: 'u64' })]))
-            );
-
-            // Get current ledger for time estimation
-            let currentLedger = 0;
-            try {
-                const latestRes = await fetch(env.sorobanRpcUrl, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
+            return rawPayments
+                .filter((raw): raw is Record<string, unknown> => raw != null && typeof raw === 'object')
+                .map((raw) => {
+                    const intervalLedgers = parseNumericValue(raw.interval);
+                    const nextLedger = parseNumericValue(raw.next_payment_ledger ?? raw.nextPaymentLedger);
+                    const ledgersUntilNext = Math.max(0, nextLedger - currentLedger);
+                    return {
+                        id: parseBigIntString(raw.id),
+                        recipient: addressToNative(raw.recipient),
+                        token: addressToNative(raw.token),
+                        amount: parseBigIntString(raw.amount),
+                        memo: typeof raw.memo === 'string' ? raw.memo : '',
+                        interval: intervalLedgers * LEDGER_INTERVAL_S,
+                        nextPaymentTime: now + ledgersUntilNext * LEDGER_INTERVAL_S * 1000,
+                        totalPayments: parseNumericValue(raw.payment_count ?? raw.paymentCount),
+                        status: mapRecurringStatus(raw.status),
+                        createdAt: now,
+                        creator: addressToNative(raw.proposer),
+                    };
                 });
-                const latestData = await latestRes.json() as { result?: { sequence?: number } };
-                currentLedger = latestData?.result?.sequence ?? 0;
-            } catch { /* ignore */ }
-
-interface RecurringPaymentRaw {
-    is_active?: boolean;
-    isActive?: boolean;
-    [key: string]: unknown;
-}
-
-            for (let i = 0; i < results.length; i++) {
-                const r = results[i];
-                if (r.status !== 'fulfilled' || r.value == null) continue;
-                const raw = r.value as RecurringPaymentRaw;
-                const id = String(ids[i]);
-                const isActive = Boolean(raw.is_active ?? raw.isActive ?? true);
-                const isCancelled = cancelledSet.has(id);
-                const intervalLedgers = parseNumericValue(raw.interval);
-                const intervalSeconds = intervalLedgers * LEDGER_INTERVAL_S;
-                const nextLedger = parseNumericValue(raw.next_payment_ledger ?? raw.nextPaymentLedger);
-                const ledgersUntilNext = Math.max(0, nextLedger - currentLedger);
-                const nextPaymentTime = now + ledgersUntilNext * LEDGER_INTERVAL_S * 1000;
-
-                payments.push({
-                    id,
-                    recipient: addressToNative(raw.recipient),
-                    token: addressToNative(raw.token),
-                    amount: parseBigIntString(raw.amount),
-                    memo: typeof raw.memo === 'string' ? raw.memo : '',
-                    interval: intervalSeconds,
-                    nextPaymentTime,
-                    totalPayments: parseNumericValue(raw.payment_count ?? raw.paymentCount),
-                    status: isCancelled ? 'cancelled' : isActive ? 'active' : 'cancelled',
-                    createdAt: now,
-                    creator: addressToNative(raw.proposer),
-                });
-            }
-            return payments;
         },
         getRecurringPaymentHistory: async (paymentId?: string): Promise<RecurringPaymentHistory[]> => {
             // Fetch payment_executed events and filter by payment context.
@@ -1628,9 +1593,7 @@ interface RecurringPaymentRaw {
                 const tokenAddress = params.token === 'native'
                     ? 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC' // XLM SAC on testnet
                     : params.token;
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1667,9 +1630,7 @@ interface RecurringPaymentRaw {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: '100' })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1707,16 +1668,13 @@ interface RecurringPaymentRaw {
             }
         },
         cancelRecurringPayment: async (paymentId?: string): Promise<void> => {
-            // No cancel function exists on-chain; persist cancellation locally.
-            if (!paymentId) throw new Error('Payment ID required');
-            const cancelledKey = `vault_cancelled_recurring_${env.contractId}`;
-            try {
-                const existing: string[] = JSON.parse(localStorage.getItem(cancelledKey) ?? '[]');
-                if (!existing.includes(paymentId)) {
-                    existing.push(paymentId);
-                    localStorage.setItem(cancelledKey, JSON.stringify(existing));
-                }
-            } catch { /* ignore */ }
+            await updateRecurringPayment('stop_recurring_payment', paymentId);
+        },
+        pauseRecurringPayment: async (paymentId?: string): Promise<void> => {
+            await updateRecurringPayment('pause_recurring_payment', paymentId);
+        },
+        resumeRecurringPayment: async (paymentId?: string): Promise<void> => {
+            await updateRecurringPayment('resume_recurring_payment', paymentId);
         },
         getAllRoles: async (): Promise<RoleAssignment[]> => {
             const result = await readContractValue('get_role_assignments');
@@ -1735,9 +1693,7 @@ interface RecurringPaymentRaw {
             setLoading(true);
             try {
                 const account = await server.getAccount(_addr);
-                const tx = new TransactionBuilder(account, { fee: "100" })
-                    .setNetworkPassphrase(env.networkPassphrase)
-                    .setTimeout(30)
+                const tx = (await newTransactionBuilder(account))
                     .addOperation(Operation.invokeHostFunction({
                         func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                             new xdr.InvokeContractArgs({
@@ -1780,9 +1736,7 @@ interface RecurringPaymentRaw {
                 setLoading(true);
                 try {
                     const account = await server.getAccount(_addr);
-                    const tx = new TransactionBuilder(account, { fee: "100" })
-                        .setNetworkPassphrase(env.networkPassphrase)
-                        .setTimeout(30)
+                    const tx = (await newTransactionBuilder(account))
                         .addOperation(Operation.invokeHostFunction({
                             func: xdr.HostFunction.hostFunctionTypeInvokeContract(
                                 new xdr.InvokeContractArgs({

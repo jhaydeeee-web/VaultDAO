@@ -35,14 +35,19 @@ const ExecutionConfirmationModal = ({
 }: ExecutionConfirmationModalProps) => {
   const [confirmText, setConfirmText] = React.useState('');
   const [isConfirming, setIsConfirming] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   const handleConfirm = async () => {
     if (requiresTypedConfirmation && confirmText !== 'EXECUTE') {
       return;
     }
     setIsConfirming(true);
+    setError(null);
     try {
       await onConfirm();
+    } catch (err) {
+      // Surface the failure instead of leaking an unhandled rejection
+      setError(err instanceof Error ? err.message : 'Execution failed');
     } finally {
       setIsConfirming(false);
       setConfirmText('');
@@ -87,6 +92,12 @@ const ExecutionConfirmationModal = ({
             placeholder='Type "EXECUTE"'
             disabled={isConfirming}
           />
+        </div>
+      )}
+
+      {error && (
+        <div data-testid="execution-error" role="alert">
+          {error}
         </div>
       )}
 
@@ -583,6 +594,7 @@ describe('ExecutionConfirmationModal', () => {
         expect(mockOnConfirm).toHaveBeenCalled();
         expect(confirmButton).not.toBeDisabled();
       });
+      expect(screen.getByRole('alert')).toHaveTextContent('Execution failed');
     });
 
     it('case-sensitive confirmation text', () => {

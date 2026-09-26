@@ -90,6 +90,13 @@ function mockVault(signers: Record<string, SignerFixture>) {
     if (fn === 'get_reputation') return signer?.reputation ?? null;
     if (fn === 'get_participation_score') return signer?.participation ?? null;
     throw new Error(`unexpected call ${fn}`);
+function mockRpcResponses(events: RpcEvent[]) {
+  (global.fetch as Mock).mockImplementation(async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(init.body as string) as { method: string };
+    if (body.method === 'getLatestLedger') {
+      return { ok: true, status: 200, json: async () => ({ result: { sequence: 1000 } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ result: { events } }) };
   });
 }
 
@@ -196,6 +203,9 @@ describe('useGovernance', () => {
 
       const { result } = renderHook(() => useGovernance());
       await waitFor(() => expect(result.current.loading).toBe(false));
+
+      // Transient failures are retried with backoff before falling back
+      await waitFor(() => expect(result.current.loading).toBe(false), { timeout: 5000 });
 
       const alice = result.current.leaderboard.find((r) => r.address === 'GALICE')!;
       expect(alice.role).toBe('Admin');

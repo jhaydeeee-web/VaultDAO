@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { ChevronDown, ChevronUp, Copy, Download } from 'lucide-react';
 import type { DiffSegment } from '../types/comparison';
 import { getDiffSegments } from '../utils/diffHighlighting';
+import { copyToClipboard } from '../utils/clipboard';
 
 export interface ProposalDiffViewerProps {
   oldProposal: Record<string, unknown>;
@@ -82,18 +83,6 @@ export const ProposalDiffViewer: React.FC<ProposalDiffViewerProps> = ({
     setExpandedFields(newExpanded);
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).catch(() => {
-      // Fallback for older browsers
-      const el = document.createElement('textarea');
-      el.value = text;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand('copy');
-      document.body.removeChild(el);
-    });
-  };
-
   const downloadDiff = () => {
     const content = diffFields
       .map((field) => `${field.fieldName}\nOld: ${field.oldValue}\nNew: ${field.newValue}`)
@@ -166,7 +155,7 @@ export const ProposalDiffViewer: React.FC<ProposalDiffViewerProps> = ({
                 field={field}
                 isExpanded={expandedFields.has(field.fieldName)}
                 onToggleExpanded={() => toggleFieldExpanded(field.fieldName)}
-                onCopy={() => copyToClipboard(field.newValue)}
+                onCopy={() => void copyToClipboard(field.newValue)}
                 viewMode={viewMode}
               />
             ))}
@@ -197,12 +186,14 @@ const FieldDiff: React.FC<FieldDiffProps> = ({
 }) => {
   return (
     <div className="rounded border border-gray-200 dark:border-gray-700">
-      {/* Field Header */}
-      <button
-        onClick={onToggleExpanded}
-        className="flex w-full items-center justify-between bg-gray-50 px-4 py-3 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
-      >
-        <div className="flex items-center gap-3 text-left">
+      {/* Field Header: toggle and copy are sibling buttons (buttons can't nest) */}
+      <div className="flex w-full items-center justify-between bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700">
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          aria-expanded={isExpanded}
+          className="flex flex-1 items-center gap-3 px-4 py-3 text-left"
+        >
           <div
             className={`transition-transform ${isExpanded ? 'rotate-180' : ''}`}
           >
@@ -216,18 +207,17 @@ const FieldDiff: React.FC<FieldDiffProps> = ({
               Key Field
             </span>
           )}
-        </div>
+        </button>
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onCopy();
-          }}
-          className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-sm text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600"
+          type="button"
+          onClick={onCopy}
+          className="mr-4 inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-sm text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600"
           title="Copy new value"
+          aria-label={`Copy new ${field.fieldName} value`}
         >
           <Copy size={14} />
         </button>
-      </button>
+      </div>
 
       {/* Field Content */}
       {isExpanded && (

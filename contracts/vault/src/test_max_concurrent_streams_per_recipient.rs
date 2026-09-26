@@ -88,42 +88,20 @@ fn test_max_concurrent_streams_to_recipient_enforced() {
 
     // Create max_streams - 1 streams (should succeed)
     for i in 0..(max_streams - 1) {
-        let stream_id = client.create_stream(
-            &admin,
-            &recipient,
-            &token,
-            &1_000i128,
-            &1_000u64,
-            &0u64,
-        );
+        let stream_id =
+            client.create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
         assert!(stream_id > 0, "Stream {} creation failed", i);
     }
 
     // Create one more stream (should succeed, reaching the limit)
-    let final_stream = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let final_stream =
+        client.create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
     assert!(final_stream > 0);
 
     // Attempt to create stream beyond the limit (should fail with TooManyStreamsToRecipient)
-    let result = client.try_create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let result = client.try_create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
 
-    assert_eq!(
-        result,
-        Err(Ok(VaultError::TooManyStreamsToRecipient))
-    );
+    assert_eq!(result, Err(Ok(VaultError::TooManyStreamsToRecipient)));
 }
 
 // ============================================================================
@@ -141,58 +119,28 @@ fn test_concurrent_streams_limit_per_recipient_only() {
     // Create max_streams to recipient1 (should all succeed)
     let recipient1 = Address::generate(&env);
     for _i in 0..max_streams {
-        let stream_id = client.create_stream(
-            &admin,
-            &recipient1,
-            &token,
-            &1_000i128,
-            &1_000u64,
-            &0u64,
-        );
+        let stream_id =
+            client.create_stream(&admin, &recipient1, &token, &1_000i128, &1_000u64, &0u64);
         assert!(stream_id > 0);
     }
 
     // Create max_streams to recipient2 (should all succeed - different recipient)
     let recipient2 = Address::generate(&env);
     for _i in 0..max_streams {
-        let stream_id = client.create_stream(
-            &admin,
-            &recipient2,
-            &token,
-            &1_000i128,
-            &1_000u64,
-            &0u64,
-        );
+        let stream_id =
+            client.create_stream(&admin, &recipient2, &token, &1_000i128, &1_000u64, &0u64);
         assert!(stream_id > 0);
     }
 
     // Verify that we cannot exceed limit for recipient1
-    let result = client.try_create_stream(
-        &admin,
-        &recipient1,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
-    assert_eq!(
-        result,
-        Err(Ok(VaultError::TooManyStreamsToRecipient))
-    );
+    let result =
+        client.try_create_stream(&admin, &recipient1, &token, &1_000i128, &1_000u64, &0u64);
+    assert_eq!(result, Err(Ok(VaultError::TooManyStreamsToRecipient)));
 
     // Verify that we cannot exceed limit for recipient2 either
-    let result = client.try_create_stream(
-        &admin,
-        &recipient2,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
-    assert_eq!(
-        result,
-        Err(Ok(VaultError::TooManyStreamsToRecipient))
-    );
+    let result =
+        client.try_create_stream(&admin, &recipient2, &token, &1_000i128, &1_000u64, &0u64);
+    assert_eq!(result, Err(Ok(VaultError::TooManyStreamsToRecipient)));
 }
 
 // ============================================================================
@@ -210,43 +158,20 @@ fn test_closing_stream_frees_concurrent_slot() {
     // Create max_streams streams
     let mut stream_ids = Vec::new(&env);
     for _i in 0..max_streams {
-        let stream_id = client.create_stream(
-            &admin,
-            &recipient,
-            &token,
-            &1_000i128,
-            &1_000u64,
-            &0u64,
-        );
+        let stream_id =
+            client.create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
         stream_ids.push_back(stream_id);
     }
 
     // Verify we can't create another one
-    let result = client.try_create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
-    assert_eq!(
-        result,
-        Err(Ok(VaultError::TooManyStreamsToRecipient))
-    );
+    let result = client.try_create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
+    assert_eq!(result, Err(Ok(VaultError::TooManyStreamsToRecipient)));
 
     // Close the first stream
     let first_stream_id = stream_ids.get(0).unwrap();
     client.close_stream(&admin, &first_stream_id);
 
     // Now we should be able to create a new stream
-    let new_stream = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &1_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let new_stream = client.create_stream(&admin, &recipient, &token, &1_000i128, &1_000u64, &0u64);
     assert!(new_stream > 0);
 }

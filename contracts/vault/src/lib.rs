@@ -117,11 +117,14 @@ const REP_APPROVAL_BONUS: u32 = 2;
 /// the companion `notif_dispatch` event.
 fn compute_relevant_signers(env: &Env, event_type: &Symbol, amount: i128) -> Vec<Address> {
     let day_offset = (env.ledger().sequence() as u64 % QUIET_HOURS_CYCLE) as u32;
-    // Use the dedicated prefs index so any address (not just role-holders) can subscribe.
+    // Use the dedicated prefs index (signers/role holders only, hard-capped).
     let known = storage::get_notification_prefs_index(env);
     let mut relevant = Vec::new(env);
 
-    for addr in known.iter() {
+    for addr in known
+        .iter()
+        .take(storage::MAX_NOTIFICATION_SUBSCRIBERS as usize)
+    {
         let prefs = match storage::get_notification_prefs(env, &addr) {
             Some(p) => p,
             None => continue,
@@ -151,6 +154,35 @@ fn compute_relevant_signers(env: &Env, event_type: &Symbol, amount: i128) -> Vec
     }
 
     relevant
+}
+
+/// Price impact (bps) of a swap relative to the oracle-implied output (#1708).
+///
+/// Uses checked arithmetic so a non-positive oracle price or an oversized
+/// amount returns a typed error instead of trapping the contract.
+fn compute_swap_price_impact(
+    amount_in: i128,
+    price_in: i128,
+    price_out: i128,
+    amount_out: i128,
+) -> Result<u32, VaultError> {
+    if price_in <= 0 || price_out <= 0 {
+        return Err(VaultError::OracleError);
+    }
+    let expected_amount_out = amount_in
+        .checked_mul(price_in)
+        .ok_or(VaultError::ArithmeticOverflow)?
+        .checked_div(price_out)
+        .ok_or(VaultError::OracleError)?;
+    if expected_amount_out <= 0 {
+        return Ok(0);
+    }
+    let impact = expected_amount_out
+        .checked_sub(amount_out)
+        .and_then(|diff| diff.checked_mul(10_000))
+        .and_then(|scaled| scaled.checked_div(expected_amount_out))
+        .ok_or(VaultError::ArithmeticOverflow)?;
+    u32::try_from(impact.max(0)).map_err(|_| VaultError::ArithmeticOverflow)
 }
 
 fn calculate_expiration_ledger(config: &Config, priority: &Priority, current_ledger: u64) -> u64 {
@@ -402,9 +434,9 @@ mod test_disputes;
 #[cfg(test)]
 mod test_escrow_counterparty_acknowledgment;
 #[cfg(test)]
-mod test_escrow_milestone_verification_event;
-#[cfg(test)]
 mod test_escrow_dispute_filing_deadline;
+#[cfg(test)]
+mod test_escrow_milestone_verification_event;
 #[cfg(test)]
 mod test_fees;
 // #[cfg(test)]
@@ -458,21 +490,20 @@ mod test_streaming;
 // #[cfg(test)]
 // mod test_subscription_downgrade_grace;
 #[cfg(test)]
-mod test_participation_scoring;
+mod test_cold_signature_age;
 #[cfg(test)]
-mod test_signers_with_roles;
+mod test_participation_scoring;
+mod test_recovery_role_revocation;
 #[cfg(test)]
 mod test_threshold_min_init;
 #[cfg(test)]
 mod test_proposal_veto_event;
 #[cfg(test)]
-mod test_remove_signer_threshold;
-#[cfg(test)]
 mod test_recurring_payment_max_total_amount;
 #[cfg(test)]
-mod test_whitelist_proposal;
+mod test_remove_signer_threshold;
 #[cfg(test)]
-mod test_cold_signature_age;
+mod test_signers_with_roles;
 #[cfg(test)]
 mod test_subscriptions;
 #[cfg(test)]
@@ -481,24 +512,39 @@ mod test_supersession_chain;
 mod test_tag_taxonomy;
 #[cfg(test)]
 mod test_tags;
+#[cfg(test)]
+mod test_threshold_min_init;
+#[cfg(test)]
+mod test_whitelist_proposal;
 // #[cfg(test)]
 // mod test_threshold_reduction;
 #[cfg(test)]
+mod test_max_concurrent_streams_per_recipient;
+#[cfg(test)]
+mod test_stream_rate_window_clawback;
+#[cfg(test)]
 mod test_timelock_ready_queue;
+#[cfg(test)]
+mod test_treasurer_pause_recurring;
 #[cfg(test)]
 mod test_var_templates;
 #[cfg(test)]
 mod test_vault_template;
-#[cfg(test)]
-mod test_voting_deadline;
-#[cfg(test)]
-mod test_max_concurrent_streams_per_recipient;
 #[cfg(test)]
 mod test_velocity_history_authorization;
 #[cfg(test)]
 mod test_treasurer_pause_recurring;
 #[cfg(test)]
 mod test_stream_rate_window_clawback;
+#[cfg(test)]
+mod test_execution_recipient_recheck;
+#[cfg(test)]
+mod test_swap_price_impact;
+#[cfg(test)]
+mod test_notification_index_cap;
+#[cfg(test)]
+mod test_earmarked_balances;
+mod test_voting_deadline;
 
 #[cfg(test)]
 pub mod mock_oracle {
@@ -2425,6 +2471,9 @@ impl VaultDAO {
             }
         }
 
+        // Re-check recipient: it may have been blacklisted after creation (#1703)
+        Self::validate_recipient(&env, &proposal.recipient)?;
+
         // Enforce retry constraints if this is a retry attempt
         let config = storage::get_config(&env)?;
         Self::ensure_vote_requirements_satisfied(&env, &config, &proposal)?;
@@ -2834,6 +2883,12 @@ impl VaultDAO {
                 break;
             }
 
+            // Re-check recipient against the current recipient list (#1703)
+            if let Err(e) = Self::validate_recipient(&env, &proposal.recipient) {
+                abort_reason = Some(e);
+                break;
+            }
+
             let current_ledger = env.ledger().sequence() as u64;
             if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
                 abort_reason = Some(VaultError::TimelockNotExpired);
@@ -2877,7 +2932,7 @@ impl VaultDAO {
 
             for i in 0..required_per_token.len() {
                 let (token_addr, required_amount) = required_per_token.get(i).unwrap();
-                if token::get_vault_balance(&env, &token_addr) < required_amount {
+                if Self::available_balance(&env, &token_addr) < required_amount {
                     abort_reason = Some(VaultError::InsufficientBalance);
                     break;
                 }
@@ -4084,9 +4139,14 @@ impl VaultDAO {
             storage::set_stream_rate_window(&env, stream_id, &window);
         }
 
-        // Check vault balance
-        let balance = token::balance(&env, &stream.token_addr);
-        if balance < amount {
+        // Release this stream's own reservation, then require the rest of the
+        // payment to come from unreserved funds (#1698)
+        let remaining = stream
+            .total_amount
+            .saturating_sub(stream.claimed_amount)
+            .max(0);
+        storage::release_stream_reserve(&env, &stream.token_addr, amount.min(remaining));
+        if Self::available_balance(&env, &stream.token_addr) < amount {
             return Err(VaultError::InsufficientBalance);
         }
 
@@ -4366,6 +4426,9 @@ impl VaultDAO {
 
         // Subtracted from the independent pool tracker
         storage::subtract_from_insurance_pool(&env, &token_addr, amount);
+        if Self::available_balance(&env, &token_addr) < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
 
         // Execute actual token transfer from vault mapping
         token::transfer(&env, &token_addr, &recipient, amount);
@@ -4398,6 +4461,9 @@ impl VaultDAO {
         }
 
         storage::subtract_from_stake_pool(&env, &token_addr, amount);
+        if Self::available_balance(&env, &token_addr) < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
         token::transfer(&env, &token_addr, &recipient, amount);
 
         Ok(())
@@ -4743,6 +4809,9 @@ impl VaultDAO {
 
         // Atomically deduct from pool and transfer
         storage::subtract_from_insurance_pool(&env, &proposal.token, proposal.amount);
+        if Self::available_balance(&env, &proposal.token) < proposal.amount {
+            return Err(VaultError::InsufficientBalance);
+        }
         token::transfer(&env, &proposal.token, &proposal.recipient, proposal.amount);
 
         proposal.status = ProposalStatus::Executed;
@@ -5627,7 +5696,11 @@ impl VaultDAO {
     /// `remove_signer` call and the multisig `ProposalOperation::RemoveSigner`
     /// path (Issue #1526). Always rejects removals that would drop the
     /// signer count below the current threshold.
-    fn remove_signer_internal(env: &Env, actor: &Address, signer: &Address) -> Result<(), VaultError> {
+    fn remove_signer_internal(
+        env: &Env,
+        actor: &Address,
+        signer: &Address,
+    ) -> Result<(), VaultError> {
         let mut config = storage::get_config(env)?;
 
         let mut found_idx: Option<u32> = None;
@@ -6557,7 +6630,9 @@ impl VaultDAO {
 
         // Attempt transfer of the full due amount.
         // If the transfer fails, schedule a retry and preserve the current payment state.
-        if token::try_transfer(&env, &payment.token, &payment.recipient, total_amount).is_err() {
+        if Self::available_balance(&env, &payment.token) < total_amount
+            || token::try_transfer(&env, &payment.token, &payment.recipient, total_amount).is_err()
+        {
             Self::schedule_recurring_retry(&env, &mut payment, current_ledger);
             storage::set_recurring_payment(&env, &payment);
             storage::extend_instance_ttl(&env);
@@ -6874,6 +6949,7 @@ impl VaultDAO {
 
         // Escrow the full amount from sender into the vault
         token::transfer_to_vault(&env, &token_addr, &sender, total_amount);
+        storage::reserve_stream(&env, &token_addr, total_amount);
 
         let stream = StreamingPayment {
             id,
@@ -6982,6 +7058,11 @@ impl VaultDAO {
                 stream.last_update_timestamp = now;
                 stream.status = StreamStatus::Completed;
                 storage::set_streaming_payment(&env, &stream);
+                storage::release_stream_reserve(
+                    &env,
+                    &stream.token_addr,
+                    stream.total_amount - stream.claimed_amount,
+                );
 
                 events::emit_stream_auto_completed(
                     &env,
@@ -6999,6 +7080,7 @@ impl VaultDAO {
             return Err(VaultError::InsufficientBalance);
         }
 
+        storage::release_stream_reserve(&env, &stream.token_addr, claimable);
         stream.claimed_amount += claimable;
         stream.accumulated_seconds = total_active_seconds;
         stream.last_update_timestamp = now;
@@ -7195,6 +7277,12 @@ impl VaultDAO {
             return Err(VaultError::InsufficientBalance);
         }
 
+        // Nothing more can be paid out of a cancelled stream
+        storage::release_stream_reserve(
+            &env,
+            &stream.token_addr,
+            stream.total_amount - stream.claimed_amount,
+        );
         stream.last_update_timestamp = now;
         stream.status = StreamStatus::Cancelled;
 
@@ -7590,6 +7678,14 @@ impl VaultDAO {
     /// `Vec<u64>` of proposal IDs in index-insertion order.
     pub fn get_pending_timelocked_proposals(env: Env, offset: u64, limit: u32) -> Vec<u64> {
         storage::get_pending_timelocked_proposals(&env, offset, limit)
+    }
+
+    /// Vault balance of `token` that is not earmarked for vesting, escrows,
+    /// streams, insurance/stake pools or collected fees (#1698).
+    fn available_balance(env: &Env, token: &Address) -> i128 {
+        token::balance(env, token)
+            .saturating_sub(storage::get_total_reserved(env, token))
+            .max(0)
     }
 
     /// Validate if a recipient is allowed based on current list mode
@@ -8316,6 +8412,11 @@ impl VaultDAO {
                 failed_count += 1;
                 continue;
             }
+            // Skip if recipient is no longer allowed by the recipient list (#1703)
+            if Self::validate_recipient(&env, &proposal.recipient).is_err() {
+                failed_count += 1;
+                continue;
+            }
             // Skip if approvals/quorum are no longer satisfied
             if Self::ensure_vote_requirements_satisfied(&env, &config, &proposal).is_err() {
                 failed_count += 1;
@@ -8370,7 +8471,7 @@ impl VaultDAO {
             }
 
             // Skip if insufficient balance (check proposal amount + stake to refund)
-            let balance = token::balance(&env, &proposal.token);
+            let balance = Self::available_balance(&env, &proposal.token);
             let required_balance = proposal.amount + proposal.stake_amount;
             if balance < required_balance {
                 failed_count += 1;
@@ -9039,12 +9140,7 @@ impl VaultDAO {
     /// Return proposal IDs tagged with `tag_id` from the `HTagProposals` index,
     /// paginated (max 50 per page). Unlike `get_proposals_by_tag_id`, this does
     /// not include descendant tags.
-    pub fn get_tag_proposals_page(
-        env: Env,
-        tag_id: u64,
-        offset: u64,
-        limit: u32,
-    ) -> Vec<u64> {
+    pub fn get_tag_proposals_page(env: Env, tag_id: u64, offset: u64, limit: u32) -> Vec<u64> {
         const MAX_RESULTS: u32 = 50;
         let cap = if limit == 0 || limit > MAX_RESULTS {
             MAX_RESULTS
@@ -9937,6 +10033,9 @@ impl VaultDAO {
         // Reset collected balance before transfer (checks-effects-interactions)
         let key = crate::storage::FeatureKey::FeesCollected(token.clone());
         env.storage().persistent().set(&key, &0i128);
+        if Self::available_balance(&env, &token) < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
 
         token::transfer(&env, &token, &recipient, amount);
 
@@ -10006,6 +10105,12 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         caller.require_auth();
 
+        // Only signers or explicit role holders may register (#1704)
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&caller) && storage::get_role(&env, &caller) == Role::Member {
+            return Err(VaultError::Unauthorized);
+        }
+
         let mut subscribed_events = Vec::new(&env);
         if prefs.notify_on_proposal {
             subscribed_events.push_back(Symbol::new(&env, "proposal"));
@@ -10030,7 +10135,7 @@ impl VaultDAO {
             quiet_hours_start: 0,
             quiet_hours_end: 0,
         };
-        storage::set_notification_prefs(&env, &stored);
+        storage::set_notification_prefs(&env, &stored)?;
         storage::extend_instance_ttl(&env);
 
         events::emit_notification_prefs_updated(&env, &caller);
@@ -10940,6 +11045,9 @@ impl VaultDAO {
                     events::emit_oracle_price_stale(env, &asset, data.timestamp, current_ledger);
                     return Err(VaultError::OraclePriceStale);
                 }
+                if data.price <= 0 {
+                    return Err(VaultError::OracleError);
+                }
                 Ok(data.price)
             }
             None => Err(VaultError::InvalidAmount), // Price not found
@@ -11458,21 +11566,20 @@ impl VaultDAO {
                 let price_in = Self::get_asset_price(env, token_in.clone())?;
                 let price_out = Self::get_asset_price(env, token_out.clone())?;
 
-                // Calculate expected amount out based on oracle prices
-                let expected_amount_out = (*amount_in * price_in) / price_out;
-
                 // TODO: Replace with actual DEX contract cross-contract invocation
                 // For now, simulate the swap with realistic behavior
-                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
+                let simulated_amount_out = amount_in
+                    .checked_mul(99)
+                    .ok_or(VaultError::ArithmeticOverflow)?
+                    / 100; // 1% slippage simulation
 
                 // Calculate actual price impact using pre-execution oracle price
-                let price_impact_bps = if expected_amount_out > 0 {
-                    let impact = ((expected_amount_out - simulated_amount_out) * 10000)
-                        / expected_amount_out;
-                    impact.max(0) as u32
-                } else {
-                    0
-                };
+                let price_impact_bps = compute_swap_price_impact(
+                    *amount_in,
+                    price_in,
+                    price_out,
+                    simulated_amount_out,
+                )?;
 
                 // Before execution: validate price_impact_bps <= dex_config.max_price_impact_bps
                 if price_impact_bps > dex_config.max_price_impact_bps {
@@ -11627,21 +11734,20 @@ impl VaultDAO {
                 let price_in = Self::get_asset_price(env, token_in.clone())?;
                 let price_out = Self::get_asset_price(env, token_out.clone())?;
 
-                // Calculate expected amount out based on oracle prices
-                let expected_amount_out = (*amount_in * price_in) / price_out;
-
                 // TODO: Replace with actual DEX contract call
                 // For now, simulate the swap with realistic slippage
-                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
+                let simulated_amount_out = amount_in
+                    .checked_mul(99)
+                    .ok_or(VaultError::ArithmeticOverflow)?
+                    / 100; // 1% slippage simulation
 
                 // Calculate actual price impact
-                let price_impact_bps = if expected_amount_out > 0 {
-                    let impact = ((expected_amount_out - simulated_amount_out) * 10000)
-                        / expected_amount_out;
-                    impact.max(0) as u32
-                } else {
-                    0
-                };
+                let price_impact_bps = compute_swap_price_impact(
+                    *amount_in,
+                    price_in,
+                    price_out,
+                    simulated_amount_out,
+                )?;
 
                 // Validate price impact against config
                 if price_impact_bps > dex_config.max_price_impact_bps {
@@ -12114,6 +12220,9 @@ impl VaultDAO {
             return Err(VaultError::GasLimitExceeded);
         }
 
+        // Snapshot unreserved balance before the fee is booked as collected
+        let balance = Self::available_balance(env, &proposal.token);
+
         // Calculate fee for this transaction
         let fee_amount = Self::collect_and_distribute_fee(
             env,
@@ -12123,7 +12232,6 @@ impl VaultDAO {
         )?;
 
         // Check vault balance (account for insurance amount and fee)
-        let balance = token::balance(env, &proposal.token);
         let total_required = proposal.amount + proposal.insurance_amount + fee_amount;
         if balance < total_required {
             return Err(VaultError::InsufficientBalance);
@@ -12901,6 +13009,7 @@ impl VaultDAO {
 
         // Transfer tokens to vault (held in escrow)
         token::transfer_to_vault(&env, &token_addr, &funder, amount);
+        storage::reserve_escrow(&env, &token_addr, amount);
 
         // Create escrow record
         let escrow_id = storage::increment_escrow_id(&env);
@@ -13068,6 +13177,7 @@ impl VaultDAO {
         };
 
         token::transfer(&env, &escrow.token, &recipient, amount_to_release);
+        storage::release_escrow_reserve(&env, &escrow.token, amount_to_release);
 
         escrow.released_amount += amount_to_release;
 
@@ -13161,6 +13271,7 @@ impl VaultDAO {
             };
 
             token::transfer(&env, &escrow.token, &recipient, amount_to_release);
+            storage::release_escrow_reserve(&env, &escrow.token, amount_to_release);
             escrow.released_amount += amount_to_release;
         }
 
@@ -13204,6 +13315,7 @@ impl VaultDAO {
         let amount_to_refund = escrow.total_amount - escrow.released_amount;
         if amount_to_refund > 0 {
             token::transfer(&env, &escrow.token, &escrow.funder, amount_to_refund);
+            storage::release_escrow_reserve(&env, &escrow.token, amount_to_refund);
             escrow.released_amount += amount_to_refund;
         }
 
@@ -13615,7 +13727,103 @@ impl VaultDAO {
 
         // Apply new configuration
         let mut config = storage::get_config(&env)?;
-        config.signers = proposal.new_signers.clone();
+        let old_signers = config.signers.clone();
+        let new_signers = proposal.new_signers.clone();
+
+        // ----------------------------------------------------------------
+        // Issue #1700: sync RBAC and delegation state with the signer swap.
+        // ----------------------------------------------------------------
+
+        // Determine which signers are being removed (present in old but not new).
+        let mut removed: Vec<Address> = Vec::new(&env);
+        for s in old_signers.iter() {
+            if !new_signers.contains(&s) {
+                removed.push_back(s);
+            }
+        }
+
+        // Determine which signers are genuinely new (present in new but not old).
+        let mut added: Vec<Address> = Vec::new(&env);
+        for s in new_signers.iter() {
+            if !old_signers.contains(&s) {
+                added.push_back(s);
+            }
+        }
+
+        // For every removed signer: clear their role entry and revoke both
+        // kinds of delegation (plain + scoped) that they may hold as delegator.
+        for signer in removed.iter() {
+            // 1. Clear the role so they can no longer satisfy Admin/Treasurer checks.
+            storage::remove_role(&env, &signer);
+
+            // 2. Revoke any active plain delegation they held.
+            let delegation = storage::get_delegation(&env, &signer);
+            if delegation.is_active {
+                storage::remove_delegation(&env, &signer);
+            }
+
+            // 3. Deactivate every scoped delegation they held as delegator.
+            let scoped_ids = storage::get_scoped_delegations_by_delegator(&env, &signer);
+            for id in scoped_ids.iter() {
+                if let Some(mut d) = storage::get_scoped_delegation(&env, id) {
+                    if d.is_active {
+                        d.is_active = false;
+                        storage::set_scoped_delegation(&env, &d);
+                    }
+                }
+            }
+        }
+
+        // For every genuinely new signer: grant them the Member role so they
+        // can participate in proposals immediately after recovery.
+        for signer in added.iter() {
+            storage::set_role(&env, &signer, Role::Member);
+        }
+
+        // ----------------------------------------------------------------
+        // Issue #1701: wipe approvals on every non-final proposal so that
+        // votes collected from the (possibly compromised) old signer set
+        // cannot be used to execute proposals after recovery.
+        //
+        // We touch Pending, Approved, and Scheduled proposals — all statuses
+        // that still allow execution.  For each:
+        //   - Clear the approvals and abstentions vectors.
+        //   - If the proposal was Approved or Scheduled, demote it back to
+        //     Pending so execute_proposal will reject it until the new signer
+        //     set re-votes.
+        //   - Also clear snapshot_signers / signer_snapshot so the new set
+        //     can vote under the fresh config rather than the old snapshot.
+        // ----------------------------------------------------------------
+        let statuses_to_invalidate: [u32; 3] = [
+            ProposalStatus::Pending as u32,
+            ProposalStatus::Approved as u32,
+            ProposalStatus::Scheduled as u32,
+        ];
+
+        let mut invalidated_ids: Vec<u64> = Vec::new(&env);
+
+        for status_u32 in statuses_to_invalidate.iter() {
+            let ids = storage::get_all_proposals_by_status_uncapped(&env, *status_u32);
+            for pid in ids.iter() {
+                if let Ok(mut p) = storage::get_proposal(&env, pid) {
+                    p.approvals = Vec::new(&env);
+                    p.abstentions = Vec::new(&env);
+                    // Refresh the signer snapshot to the new signer set so the
+                    // new signers are eligible to vote immediately.
+                    p.snapshot_signers = new_signers.clone();
+                    p.signer_snapshot = Map::new(&env);
+                    // Demote any already-approved/scheduled proposal back to
+                    // Pending; Pending proposals stay Pending.
+                    if p.status != ProposalStatus::Pending {
+                        p.status = ProposalStatus::Pending;
+                    }
+                    storage::set_proposal(&env, &p);
+                    invalidated_ids.push_back(pid);
+                }
+            }
+        }
+
+        config.signers = new_signers;
         config.threshold = proposal.new_threshold;
         // Reset quorum and other fields to safe defaults if they were invalid for new signers
         if config.quorum > config.signers.len() {
@@ -13628,6 +13836,9 @@ impl VaultDAO {
         storage::set_recovery_proposal(&env, &proposal);
 
         events::emit_recovery_executed(&env, proposal_id);
+        if !invalidated_ids.is_empty() {
+            events::emit_proposals_invalidated_by_recovery(&env, proposal_id, invalidated_ids);
+        }
         events::emit_config_updated(&env, &env.current_contract_address());
 
         Ok(())
@@ -15328,6 +15539,7 @@ impl VaultDAO {
                             (escrow.funder.clone(), true)
                         };
                         token::transfer(&env, &escrow.token, &to_addr, unreleased);
+                        storage::release_escrow_reserve(&env, &escrow.token, unreleased);
                         escrow.released_amount = escrow.total_amount;
                         events::emit_escrow_released(&env, eid, &to_addr, unreleased, is_refund);
                     }
@@ -17016,7 +17228,7 @@ impl VaultDAO {
             return Err(VaultError::BatchTooLarge);
         }
         let reserved = storage::get_reserved_vesting(&env, &token_addr);
-        if token::balance(&env, &token_addr).saturating_sub(reserved) < total {
+        if Self::available_balance(&env, &token_addr) < total {
             return Err(VaultError::InsufficientBalance);
         }
 

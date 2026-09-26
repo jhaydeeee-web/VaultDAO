@@ -81,14 +81,8 @@ fn test_stream_rate_window_reset_on_clawback() {
     let (client, admin, token, recipient) = setup(&env);
 
     // Create an initial stream
-    let stream_id_1 = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &10_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let stream_id_1 =
+        client.create_stream(&admin, &recipient, &token, &10_000i128, &1_000u64, &0u64);
     assert!(stream_id_1 > 0);
 
     // Get initial rate window info (should exist)
@@ -113,14 +107,8 @@ fn test_stream_rate_window_reset_on_clawback() {
 
     // Create a new stream to the same recipient
     // This should use a fresh rate window (not constrained by the clawed-back stream's window)
-    let stream_id_2 = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &10_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let stream_id_2 =
+        client.create_stream(&admin, &recipient, &token, &10_000i128, &1_000u64, &0u64);
     assert!(stream_id_2 > 0);
 
     // Get the rate window for the new stream
@@ -141,14 +129,8 @@ fn test_clawed_back_stream_window_does_not_affect_new_streams() {
     let (client, admin, token, recipient) = setup(&env);
 
     // Create first stream with a certain rate configuration
-    let stream_id_1 = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &50_000i128,
-        &2_000u64,
-        &0u64,
-    );
+    let stream_id_1 =
+        client.create_stream(&admin, &recipient, &token, &50_000i128, &2_000u64, &0u64);
 
     // Clawback the first stream
     let clawback_id = client.request_stream_clawback(
@@ -161,25 +143,13 @@ fn test_clawed_back_stream_window_does_not_affect_new_streams() {
     client.vote_clawback(&admin, &clawback_id, &true);
 
     // Create a second stream to the same recipient
-    let stream_id_2 = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &50_000i128,
-        &2_000u64,
-        &0u64,
-    );
+    let stream_id_2 =
+        client.create_stream(&admin, &recipient, &token, &50_000i128, &2_000u64, &0u64);
     assert!(stream_id_2 > 0);
 
     // Create a third stream to the same recipient
-    let stream_id_3 = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &50_000i128,
-        &2_000u64,
-        &0u64,
-    );
+    let stream_id_3 =
+        client.create_stream(&admin, &recipient, &token, &50_000i128, &2_000u64, &0u64);
     assert!(stream_id_3 > 0);
 
     // All three streams should exist independently with no rate window conflicts
@@ -201,14 +171,7 @@ fn test_rate_window_storage_cleanup_on_clawback() {
     let (client, admin, token, recipient) = setup(&env);
 
     // Create stream with specific rate limiting
-    let stream_id = client.create_stream(
-        &admin,
-        &recipient,
-        &token,
-        &10_000i128,
-        &1_000u64,
-        &0u64,
-    );
+    let stream_id = client.create_stream(&admin, &recipient, &token, &10_000i128, &1_000u64, &0u64);
 
     // Get rate window before clawback (it may exist)
     let _rate_window_before = client.get_stream_rate_window(&stream_id);

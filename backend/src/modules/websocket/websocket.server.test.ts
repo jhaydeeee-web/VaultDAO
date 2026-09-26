@@ -547,8 +547,10 @@ test("WebSocket State Machine", async (t) => {
       process.env["API_KEY"] = "secret-key";
 
       try {
-        // Connect without token — server closes immediately with 4401
-        const ws = new WebSocket(wsUrl);
+        // Connect with a wrong token — server closes immediately with 4401.
+        // (Omitting the token puts the client in "connecting" instead; see
+        // websocket.connection-limits.test.ts for the auth-deadline path.)
+        const ws = new WebSocket(`${wsUrl}?token=wrong-key`);
         const closeEvent = await waitForClose(ws);
         assert.equal(closeEvent.code, 4401);
       } finally {
