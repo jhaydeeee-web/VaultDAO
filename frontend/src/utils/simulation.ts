@@ -282,11 +282,11 @@ export function extractStateChanges(
             }
             break;
 
-        case 'add_signer':
+        case 'propose_vault_config_change':
             changes.push({
-                type: 'config',
-                description: 'Signer added',
-                after: 'Total signers increased by 1',
+                type: 'proposal',
+                description: 'Config change proposal',
+                after: 'Created (pending approval)',
             });
             break;
 

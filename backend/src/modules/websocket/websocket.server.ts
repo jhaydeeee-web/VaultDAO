@@ -64,6 +64,32 @@ export type ConnectionState = "connecting" | "authenticated" | "subscribed";
 /** Close code defined by RFC 6455 §7.4 – "violated policy". */
 export const WS_CLOSE_POLICY_VIOLATION = 1008;
 
+/** Close code defined by RFC 6455 §7.4 – "try again later". */
+export const WS_CLOSE_TRY_AGAIN_LATER = 1013;
+
+/** Application close code: client did not authenticate before the deadline. */
+export const WS_CLOSE_AUTH_TIMEOUT = 4408;
+
+// ---------------------------------------------------------------------------
+// Connection limits
+// ---------------------------------------------------------------------------
+
+export interface WebSocketConnectionLimits {
+  /**
+   * Close connections still in the "connecting" state after this many ms.
+   * Default: 10_000.
+   */
+  authTimeoutMs?: number;
+  /** Maximum number of concurrent connections across all clients. Default: 10_000. */
+  maxConnections?: number;
+  /** Maximum number of concurrent connections from a single IP. Default: 20. */
+  maxConnectionsPerIp?: number;
+}
+
+export const DEFAULT_WS_AUTH_TIMEOUT_MS = 10_000;
+export const DEFAULT_WS_MAX_CONNECTIONS = 10_000;
+export const DEFAULT_WS_MAX_CONNECTIONS_PER_IP = 20;
+
 // ---------------------------------------------------------------------------
 // Per-connection heartbeat state
 // ---------------------------------------------------------------------------
@@ -95,6 +121,10 @@ interface ClientSubscription {
   state: ConnectionState;
   /** Heartbeat tracking state. */
   heartbeat: HeartbeatStats;
+  /** Remote IP used for per-IP connection accounting. */
+  ip: string;
+  /** Pending auth-deadline timer while in the "connecting" state. */
+  authTimer: ReturnType<typeof setTimeout> | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,13 +176,23 @@ export class EventWebSocketServer extends EventEmitter {
   private readonly maxSubscriptionsPerClient: number;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private readonly metrics: MetricsRegistry | null;
+  /** ip → number of open connections from that address */
+  private connectionsPerIp: Map<string, number> = new Map();
+  private readonly authTimeoutMs: number;
+  private readonly maxConnections: number;
+  private readonly maxConnectionsPerIp: number;
 
   constructor(
     server: Server,
     metricsOrMaxSubs?: MetricsRegistry | number,
     maxSubscriptionsPerClient = 100,
+    limits: WebSocketConnectionLimits = {},
   ) {
     super();
+    this.authTimeoutMs = limits.authTimeoutMs ?? DEFAULT_WS_AUTH_TIMEOUT_MS;
+    this.maxConnections = limits.maxConnections ?? DEFAULT_WS_MAX_CONNECTIONS;
+    this.maxConnectionsPerIp =
+      limits.maxConnectionsPerIp ?? DEFAULT_WS_MAX_CONNECTIONS_PER_IP;
     if (typeof metricsOrMaxSubs === "number") {
       this.maxSubscriptionsPerClient = metricsOrMaxSubs;
       this.metrics = null;
@@ -269,10 +309,30 @@ export class EventWebSocketServer extends EventEmitter {
       const url = new URL(req.url ?? "/", "http://localhost");
       const token = url.searchParams.get("token");
       const apiKey = process.env["API_KEY"];
+      const ip = req.socket.remoteAddress ?? "unknown";
 
-      // If an API key is configured and the query-param token is wrong, reject
-      // immediately — this is a hard auth failure, not a state transition.
-      if (apiKey && token !== apiKey) {
+      // Enforce global and per-IP connection caps before doing any other work.
+      if (this.clients.size >= this.maxConnections) {
+        ws.close(WS_CLOSE_TRY_AGAIN_LATER, "Server connection limit reached");
+        logger.warn("rejected websocket connection: global limit reached", {
+          maxConnections: this.maxConnections,
+        });
+        return;
+      }
+      if ((this.connectionsPerIp.get(ip) ?? 0) >= this.maxConnectionsPerIp) {
+        ws.close(WS_CLOSE_TRY_AGAIN_LATER, "Per-IP connection limit reached");
+        logger.warn("rejected websocket connection: per-IP limit reached", {
+          ip,
+          maxConnectionsPerIp: this.maxConnectionsPerIp,
+        });
+        return;
+      }
+
+      // If an API key is configured and a query-param token was supplied but
+      // is wrong, reject immediately — this is a hard auth failure, not a
+      // state transition. Clients that omit the token start in "connecting"
+      // and must send an "authenticate" message before the auth deadline.
+      if (apiKey && token !== null && token !== apiKey) {
         ws.close(4401, "Unauthorized");
         logger.warn("rejected unauthenticated websocket connection");
         return;
@@ -286,7 +346,7 @@ export class EventWebSocketServer extends EventEmitter {
       const initialState: ConnectionState =
         !apiKey || token === apiKey ? "authenticated" : "connecting";
 
-      this.clients.set(ws, {
+      const sub: ClientSubscription = {
         connectionId,
         subscriptions: new Set(),
         rooms: new Set(),
@@ -297,7 +357,26 @@ export class EventWebSocketServer extends EventEmitter {
           smoothedRtt: 0,
           adaptiveTimeoutMs: HEARTBEAT_BASE_TIMEOUT_MS,
         },
-      });
+        ip,
+        authTimer: null,
+      };
+      this.clients.set(ws, sub);
+      this.connectionsPerIp.set(ip, (this.connectionsPerIp.get(ip) ?? 0) + 1);
+
+      // Unauthenticated connections must not be kept alive indefinitely by
+      // heartbeats: close them if they have not authenticated in time.
+      if (initialState === "connecting") {
+        sub.authTimer = setTimeout(() => {
+          sub.authTimer = null;
+          if (sub.state !== "connecting") return;
+          logger.warn("closing websocket connection: auth deadline exceeded", {
+            connectionId,
+            authTimeoutMs: this.authTimeoutMs,
+          });
+          ws.close(WS_CLOSE_AUTH_TIMEOUT, "Authentication timeout");
+        }, this.authTimeoutMs);
+        sub.authTimer.unref?.();
+      }
 
       ws.on("pong", () => {
         this.handlePong(ws);
@@ -551,6 +630,10 @@ export class EventWebSocketServer extends EventEmitter {
     }
 
     sub.state = "authenticated";
+    if (sub.authTimer) {
+      clearTimeout(sub.authTimer);
+      sub.authTimer = null;
+    }
     logger.info("client authenticated via message", {
       connectionId: sub.connectionId,
     });
@@ -597,6 +680,15 @@ export class EventWebSocketServer extends EventEmitter {
   private cleanupConnection(ws: WebSocket, connectionId: string): void {
     const sub = this.clients.get(ws);
     if (!sub) return;
+
+    if (sub.authTimer) {
+      clearTimeout(sub.authTimer);
+      sub.authTimer = null;
+    }
+
+    const ipCount = (this.connectionsPerIp.get(sub.ip) ?? 1) - 1;
+    if (ipCount <= 0) this.connectionsPerIp.delete(sub.ip);
+    else this.connectionsPerIp.set(sub.ip, ipCount);
 
     // Remove from all rooms
     for (const roomId of sub.rooms) {

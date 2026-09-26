@@ -41,7 +41,7 @@ function MyComponent() {
 
 ### 2. Translation Namespace Structure
 
-Translations are organized by functionality in `src/translations/*.json`:
+Translations are served from `public/locales/<lng>/translation.json` and loaded on demand by `i18next-http-backend`. Keys are organized by functionality:
 
 ```json
 {
@@ -58,12 +58,13 @@ Access translations using dot notation: `t('section.key')`
 
 When adding new strings:
 
-1. **Add to all language files** in `src/translations/`:
-   - `en.json` (English)
-   - `es.json` (Spanish)
-   - `fr.json` (French)
-   - `ar.json` (Arabic)
-   - `zh.json` (Chinese)
+1. **Add to all language files** in `public/locales/<lng>/translation.json`:
+   - `en` (English)
+   - `es` (Spanish)
+   - `fr` (French)
+   - `ar` (Arabic)
+   - `zh` (Simplified Chinese)
+   - `zh-TW` (Traditional Chinese)
 
 2. **Maintain consistent structure** across all files
 3. **Use descriptive key names** that indicate context
@@ -298,7 +299,7 @@ function Dashboard() {
 
 ### Add Translation Keys:
 
-In `translations/en.json` (and other language files):
+In `public/locales/en/translation.json` (and other language files):
 ```json
 {
   "dashboard": {
@@ -325,19 +326,21 @@ In `translations/en.json` (and other language files):
 ## File Structure
 
 ```
-frontend/src/
-├── i18n.ts                (i18n configuration)
-├── translations/          (translation files)
-│   ├── en.json
-│   ├── es.json
-│   ├── fr.json
-│   ├── ar.json
-│   └── zh.json
-├── components/
-│   └── LanguageSwitcher.tsx
-├── utils/
-│   └── localeFormatter.ts (formatting utilities)
-└── index.css             (RTL support CSS)
+frontend/
+├── public/locales/        (translation files, one folder per language)
+│   ├── en/translation.json
+│   ├── es/translation.json
+│   ├── fr/translation.json
+│   ├── ar/translation.json
+│   ├── zh/translation.json
+│   └── zh-TW/translation.json
+└── src/
+    ├── i18n.ts                (i18n configuration)
+    ├── components/
+    │   └── LanguageSwitcher.tsx
+    ├── utils/
+    │   └── localeFormatter.ts (formatting utilities)
+    └── index.css              (RTL support CSS)
 ```
 
 ## Testing Across Languages

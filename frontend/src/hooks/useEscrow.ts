@@ -6,7 +6,7 @@
  * getVaultEvents, mirroring the same pattern used by getProposals().
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   xdr,
   Address,
@@ -18,6 +18,8 @@ import {
 import { useWallet } from './useWallet';
 import { env } from '../config/env';
 import { parseError } from '../utils/errorParser';
+import { newTransactionBuilder } from '../utils/transactionBuilder';
+import { fetchContractEvents, isAbortError } from '../utils/sorobanEvents';
 import type { Escrow, EscrowStatus, Milestone, MilestoneStatus, EscrowDispute } from '../types/escrow';
 
 const server = new SorobanRpc.Server(env.sorobanRpcUrl);
@@ -138,46 +140,22 @@ export function useEscrow(): UseEscrowReturn {
    * Fetch escrows from on-chain events.
    * Falls back to mock data when no events are found (dev / testnet with no escrow activity).
    */
+  const fetchAbortRef = useRef<AbortController | null>(null);
+
   const fetchEscrows = useCallback(async () => {
+    fetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     setLoading(true);
     setError(null);
     try {
       // Attempt to fetch from Soroban events
-      const latestRes = await fetch(env.sorobanRpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestLedger' }),
+      const { events } = await fetchContractEvents({
+        lookbackLedgers: 100_000,
+        signal: controller.signal,
       });
-      const latestData = await latestRes.json() as { result?: { sequence?: number } };
-      const latestLedger = latestData?.result?.sequence ?? 0;
-      const startLedger = Math.max(1, latestLedger - 100000);
-
-      const evRes = await fetch(env.sorobanRpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 2,
-          method: 'getEvents',
-          params: {
-            startLedger: String(startLedger),
-            filters: [{ type: 'contract', contractIds: [env.contractId] }],
-            pagination: { limit: 200 },
-          },
-        }),
-      });
-      const evData = await evRes.json() as {
-        result?: {
-          events?: Array<{
-            id: string;
-            topic?: string[];
-            value?: { xdr?: string };
-            ledgerClosedAt?: string;
-          }>;
-        };
-      };
-
-      const events = evData.result?.events ?? [];
+      if (controller.signal.aborted) return;
 
       // Filter escrow-related events
       const escrowEvents = events.filter((ev) => {
@@ -202,17 +180,21 @@ export function useEscrow(): UseEscrowReturn {
       // TODO: reconstruct escrow state from events when real data exists
       setEscrows(buildMockEscrows(address));
     } catch (err) {
+      if (isAbortError(err) || controller.signal.aborted) return;
       console.error('useEscrow: fetchEscrows failed', err);
       // Graceful fallback to mock data
       setEscrows(buildMockEscrows(address));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [address]);
 
   useEffect(() => {
     void fetchEscrows();
   }, [fetchEscrows]);
+
+  // Cancel any in-flight event fetch on unmount
+  useEffect(() => () => fetchAbortRef.current?.abort(), []);
 
   /**
    * Call the contract's verify_milestone function.
@@ -225,9 +207,7 @@ export function useEscrow(): UseEscrowReturn {
       setVerifyingMilestone(key);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(
@@ -296,9 +276,7 @@ export function useEscrow(): UseEscrowReturn {
       setRaisingDispute(escrowId);
       try {
         const account = await server.getAccount(_addr);
-        const tx = new TransactionBuilder(account, { fee: '100' })
-          .setNetworkPassphrase(env.networkPassphrase)
-          .setTimeout(30)
+        const tx = (await newTransactionBuilder(account))
           .addOperation(
             Operation.invokeHostFunction({
               func: xdr.HostFunction.hostFunctionTypeInvokeContract(

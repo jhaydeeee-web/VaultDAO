@@ -314,13 +314,13 @@ describe('CommandPalette', () => {
     const items = screen.getAllByRole('option');
 
     // First item should be active
-    expect(input.getAttribute('aria-activedescendant')).toBe(`cmd-item-${items[0].id}`);
+    expect(input.getAttribute('aria-activedescendant')).toBe(items[0].id);
 
     // Move down
     fireEvent.keyDown(input, { key: 'ArrowDown' });
 
     await waitFor(() => {
-      expect(input.getAttribute('aria-activedescendant')).toBe(`cmd-item-${items[1].id}`);
+      expect(input.getAttribute('aria-activedescendant')).toBe(items[1].id);
     });
   });
 

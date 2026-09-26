@@ -434,9 +434,9 @@ mod test_disputes;
 #[cfg(test)]
 mod test_escrow_counterparty_acknowledgment;
 #[cfg(test)]
-mod test_escrow_milestone_verification_event;
-#[cfg(test)]
 mod test_escrow_dispute_filing_deadline;
+#[cfg(test)]
+mod test_escrow_milestone_verification_event;
 #[cfg(test)]
 mod test_fees;
 // #[cfg(test)]
@@ -490,21 +490,20 @@ mod test_streaming;
 // #[cfg(test)]
 // mod test_subscription_downgrade_grace;
 #[cfg(test)]
-mod test_participation_scoring;
+mod test_cold_signature_age;
 #[cfg(test)]
-mod test_signers_with_roles;
+mod test_participation_scoring;
+mod test_recovery_role_revocation;
 #[cfg(test)]
 mod test_threshold_min_init;
 #[cfg(test)]
 mod test_proposal_veto_event;
 #[cfg(test)]
-mod test_remove_signer_threshold;
-#[cfg(test)]
 mod test_recurring_payment_max_total_amount;
 #[cfg(test)]
-mod test_whitelist_proposal;
+mod test_remove_signer_threshold;
 #[cfg(test)]
-mod test_cold_signature_age;
+mod test_signers_with_roles;
 #[cfg(test)]
 mod test_subscriptions;
 #[cfg(test)]
@@ -513,18 +512,24 @@ mod test_supersession_chain;
 mod test_tag_taxonomy;
 #[cfg(test)]
 mod test_tags;
+#[cfg(test)]
+mod test_threshold_min_init;
+#[cfg(test)]
+mod test_whitelist_proposal;
 // #[cfg(test)]
 // mod test_threshold_reduction;
 #[cfg(test)]
+mod test_max_concurrent_streams_per_recipient;
+#[cfg(test)]
+mod test_stream_rate_window_clawback;
+#[cfg(test)]
 mod test_timelock_ready_queue;
+#[cfg(test)]
+mod test_treasurer_pause_recurring;
 #[cfg(test)]
 mod test_var_templates;
 #[cfg(test)]
 mod test_vault_template;
-#[cfg(test)]
-mod test_voting_deadline;
-#[cfg(test)]
-mod test_max_concurrent_streams_per_recipient;
 #[cfg(test)]
 mod test_velocity_history_authorization;
 #[cfg(test)]
@@ -539,6 +544,7 @@ mod test_swap_price_impact;
 mod test_notification_index_cap;
 #[cfg(test)]
 mod test_earmarked_balances;
+mod test_voting_deadline;
 
 #[cfg(test)]
 pub mod mock_oracle {
@@ -5690,7 +5696,11 @@ impl VaultDAO {
     /// `remove_signer` call and the multisig `ProposalOperation::RemoveSigner`
     /// path (Issue #1526). Always rejects removals that would drop the
     /// signer count below the current threshold.
-    fn remove_signer_internal(env: &Env, actor: &Address, signer: &Address) -> Result<(), VaultError> {
+    fn remove_signer_internal(
+        env: &Env,
+        actor: &Address,
+        signer: &Address,
+    ) -> Result<(), VaultError> {
         let mut config = storage::get_config(env)?;
 
         let mut found_idx: Option<u32> = None;
@@ -9130,12 +9140,7 @@ impl VaultDAO {
     /// Return proposal IDs tagged with `tag_id` from the `HTagProposals` index,
     /// paginated (max 50 per page). Unlike `get_proposals_by_tag_id`, this does
     /// not include descendant tags.
-    pub fn get_tag_proposals_page(
-        env: Env,
-        tag_id: u64,
-        offset: u64,
-        limit: u32,
-    ) -> Vec<u64> {
+    pub fn get_tag_proposals_page(env: Env, tag_id: u64, offset: u64, limit: u32) -> Vec<u64> {
         const MAX_RESULTS: u32 = 50;
         let cap = if limit == 0 || limit > MAX_RESULTS {
             MAX_RESULTS
@@ -13722,7 +13727,103 @@ impl VaultDAO {
 
         // Apply new configuration
         let mut config = storage::get_config(&env)?;
-        config.signers = proposal.new_signers.clone();
+        let old_signers = config.signers.clone();
+        let new_signers = proposal.new_signers.clone();
+
+        // ----------------------------------------------------------------
+        // Issue #1700: sync RBAC and delegation state with the signer swap.
+        // ----------------------------------------------------------------
+
+        // Determine which signers are being removed (present in old but not new).
+        let mut removed: Vec<Address> = Vec::new(&env);
+        for s in old_signers.iter() {
+            if !new_signers.contains(&s) {
+                removed.push_back(s);
+            }
+        }
+
+        // Determine which signers are genuinely new (present in new but not old).
+        let mut added: Vec<Address> = Vec::new(&env);
+        for s in new_signers.iter() {
+            if !old_signers.contains(&s) {
+                added.push_back(s);
+            }
+        }
+
+        // For every removed signer: clear their role entry and revoke both
+        // kinds of delegation (plain + scoped) that they may hold as delegator.
+        for signer in removed.iter() {
+            // 1. Clear the role so they can no longer satisfy Admin/Treasurer checks.
+            storage::remove_role(&env, &signer);
+
+            // 2. Revoke any active plain delegation they held.
+            let delegation = storage::get_delegation(&env, &signer);
+            if delegation.is_active {
+                storage::remove_delegation(&env, &signer);
+            }
+
+            // 3. Deactivate every scoped delegation they held as delegator.
+            let scoped_ids = storage::get_scoped_delegations_by_delegator(&env, &signer);
+            for id in scoped_ids.iter() {
+                if let Some(mut d) = storage::get_scoped_delegation(&env, id) {
+                    if d.is_active {
+                        d.is_active = false;
+                        storage::set_scoped_delegation(&env, &d);
+                    }
+                }
+            }
+        }
+
+        // For every genuinely new signer: grant them the Member role so they
+        // can participate in proposals immediately after recovery.
+        for signer in added.iter() {
+            storage::set_role(&env, &signer, Role::Member);
+        }
+
+        // ----------------------------------------------------------------
+        // Issue #1701: wipe approvals on every non-final proposal so that
+        // votes collected from the (possibly compromised) old signer set
+        // cannot be used to execute proposals after recovery.
+        //
+        // We touch Pending, Approved, and Scheduled proposals — all statuses
+        // that still allow execution.  For each:
+        //   - Clear the approvals and abstentions vectors.
+        //   - If the proposal was Approved or Scheduled, demote it back to
+        //     Pending so execute_proposal will reject it until the new signer
+        //     set re-votes.
+        //   - Also clear snapshot_signers / signer_snapshot so the new set
+        //     can vote under the fresh config rather than the old snapshot.
+        // ----------------------------------------------------------------
+        let statuses_to_invalidate: [u32; 3] = [
+            ProposalStatus::Pending as u32,
+            ProposalStatus::Approved as u32,
+            ProposalStatus::Scheduled as u32,
+        ];
+
+        let mut invalidated_ids: Vec<u64> = Vec::new(&env);
+
+        for status_u32 in statuses_to_invalidate.iter() {
+            let ids = storage::get_all_proposals_by_status_uncapped(&env, *status_u32);
+            for pid in ids.iter() {
+                if let Ok(mut p) = storage::get_proposal(&env, pid) {
+                    p.approvals = Vec::new(&env);
+                    p.abstentions = Vec::new(&env);
+                    // Refresh the signer snapshot to the new signer set so the
+                    // new signers are eligible to vote immediately.
+                    p.snapshot_signers = new_signers.clone();
+                    p.signer_snapshot = Map::new(&env);
+                    // Demote any already-approved/scheduled proposal back to
+                    // Pending; Pending proposals stay Pending.
+                    if p.status != ProposalStatus::Pending {
+                        p.status = ProposalStatus::Pending;
+                    }
+                    storage::set_proposal(&env, &p);
+                    invalidated_ids.push_back(pid);
+                }
+            }
+        }
+
+        config.signers = new_signers;
         config.threshold = proposal.new_threshold;
         // Reset quorum and other fields to safe defaults if they were invalid for new signers
         if config.quorum > config.signers.len() {
@@ -13735,6 +13836,9 @@ impl VaultDAO {
         storage::set_recovery_proposal(&env, &proposal);
 
         events::emit_recovery_executed(&env, proposal_id);
+        if !invalidated_ids.is_empty() {
+            events::emit_proposals_invalidated_by_recovery(&env, proposal_id, invalidated_ids);
+        }
         events::emit_config_updated(&env, &env.current_contract_address());
 
         Ok(())

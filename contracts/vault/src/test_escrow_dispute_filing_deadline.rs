@@ -206,11 +206,7 @@ fn test_disputes_can_be_filed_before_deadline() {
         .expect("create_escrow should succeed");
 
     // File dispute before deadline - should succeed
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"));
     assert!(result.is_ok()); // Should succeed as we're before deadline
 }
 
@@ -255,11 +251,7 @@ fn test_disputes_rejected_after_deadline() {
     env.ledger().set_sequence(expires_at + 1);
 
     // Try to file dispute after deadline - should fail
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"));
     assert!(result.is_err()); // Should fail with EscrowDisputeWindowClosed
 }
 
@@ -302,11 +294,7 @@ fn test_deadline_respects_ledger_progression() {
 
     // Just before deadline - should succeed
     env.ledger().set_sequence(expires_at - 1);
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"));
     assert!(result.is_ok());
 }
 
@@ -352,18 +340,10 @@ fn test_multiple_parties_cannot_file_after_deadline() {
     env.ledger().set_sequence(expires_at + 1);
 
     // Neither recipient nor funder can file dispute after deadline
-    let result1 = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result1 = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"));
     assert!(result1.is_err());
 
-    let result2 = client.dispute_escrow(
-        &admin,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result2 = client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "non_delivery"));
     // Might fail due to different authorization or deadline
 }
 
@@ -407,11 +387,7 @@ fn test_disputes_at_exact_deadline_boundary_rejected() {
     // At exact deadline - might be allowed or rejected depending on implementation
     env.ledger().set_sequence(expires_at);
 
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "non_delivery"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"));
     // Typically, at-deadline is considered expired (boundary is exclusive)
     // Implementation may allow or reject - both are valid
 }
@@ -501,22 +477,14 @@ fn test_deadline_prevents_indefinite_disputes() {
 
     // File dispute within window
     client
-        .dispute_escrow(
-            &recipient,
-            &escrow_id,
-            &Symbol::new(&env, "non_delivery"),
-        )
+        .dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "non_delivery"))
         .expect("dispute within window should succeed");
 
     // Advance far into the future (5000 ledgers)
     env.ledger().set_sequence(current_ledger + 5000);
 
     // Try to file another dispute - should fail
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "another_issue"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "another_issue"));
     assert!(result.is_err()); // Window is closed
 }
 
@@ -569,10 +537,6 @@ fn test_deadline_window_closure_prevents_finality_issues() {
     // After release, funds are gone but deadline still enforces no new disputes
     env.ledger().set_sequence(expires_at + 1);
 
-    let result = client.dispute_escrow(
-        &recipient,
-        &escrow_id,
-        &Symbol::new(&env, "too_late"),
-    );
+    let result = client.dispute_escrow(&recipient, &escrow_id, &Symbol::new(&env, "too_late"));
     assert!(result.is_err()); // Window closed
 }

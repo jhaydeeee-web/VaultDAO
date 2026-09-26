@@ -91,14 +91,14 @@ export const ProposalTimeline: React.FC<ProposalTimelineProps> = ({
             currentStatus === 'Approved' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100' :
             currentStatus === 'Rejected' || currentStatus === 'Cancelled' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-100' :
             'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-100'
-          }`}>
+          }`} data-testid="proposal-status-badge">
             {currentStatus}
           </span>
         </div>
       </div>
 
       {/* Status Progression Timeline */}
-      <div className="status-progression mb-8">
+      <div className="status-progression mb-8" data-testid="status-progression">
         <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
           Status Progression
         </h3>

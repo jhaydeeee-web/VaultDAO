@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import LiveUpdates from '../LiveUpdates';
 import RealtimeNotifications from '../RealtimeNotifications';
@@ -23,14 +23,22 @@ vi.mock('../../contexts/RealtimeContext', () => ({
   useRealtime: () => mockContextValue,
 }));
 
+// Icons render no text so they can't collide with notification titles like "Info".
 vi.mock('lucide-react', () => ({
-  Bell: () => <span data-testid="bell-icon">Bell</span>,
-  X: () => <span data-testid="close-icon">X</span>,
-  CheckCircle: () => <span data-testid="check-icon">CheckCircle</span>,
-  XCircle: () => <span data-testid="x-icon">XCircle</span>,
-  AlertCircle: () => <span data-testid="alert-icon">AlertCircle</span>,
-  Info: () => <span data-testid="info-icon">Info</span>,
+  Bell: () => <span data-testid="bell-icon" aria-hidden="true" />,
+  X: () => <span data-testid="close-icon" aria-hidden="true" />,
+  CheckCircle: () => <span data-testid="check-icon" aria-hidden="true" />,
+  XCircle: () => <span data-testid="x-icon" aria-hidden="true" />,
+  AlertCircle: () => <span data-testid="alert-icon" aria-hidden="true" />,
+  Info: () => <span data-testid="info-icon" aria-hidden="true" />,
 }));
+
+/** Push a realtime event through the subscribed callback. */
+function emit(event: string, data: unknown) {
+  act(() => {
+    mockContextValue.callbacks[event]?.(data);
+  });
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
@@ -42,12 +50,16 @@ describe('Real-Time Accessibility - Issue #1584', () => {
 
   describe('LiveUpdates Accessibility', () => {
     it('should render with aria-live region for announcement', () => {
-      const { container } = render(<LiveUpdates />);
+      render(<LiveUpdates />);
+      // The panel stays hidden until the first update arrives
+      expect(screen.queryByText('Live Updates')).not.toBeInTheDocument();
 
-      // Check for aria-live region that announcements would use
-      const liveRegion = container.querySelector('[aria-live]');
-      // Either aria-live is on root or in component structure
+      emit('proposal_created', { id: '1' });
+
       expect(screen.getByText('Live Updates')).toBeInTheDocument();
+      const liveRegion = screen.getByRole('log', { name: /live updates/i });
+      expect(liveRegion).toHaveAttribute('aria-live', 'polite');
+      expect(liveRegion).toHaveTextContent(/New proposal #1 created/);
     });
 
     it('should announce proposal created updates to screen readers', async () => {
@@ -91,6 +103,7 @@ describe('Real-Time Accessibility - Issue #1584', () => {
 
     it('should have accessible close button', () => {
       render(<LiveUpdates />);
+      emit('proposal_created', { id: '1' });
 
       const closeButton = screen.getByRole('button', { name: /close live updates/i });
       expect(closeButton).toBeInTheDocument();
@@ -126,6 +139,7 @@ describe('Real-Time Accessibility - Issue #1584', () => {
 
     it('should have accessible clear button', () => {
       render(<LiveUpdates />);
+      emit('proposal_created', { id: '1' });
 
       const clearButton = screen.getByRole('button', { name: /clear all/i });
       expect(clearButton).toBeInTheDocument();
