@@ -17,7 +17,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet. Add items here as PRs land, then move them to a versioned section on release._
+### Added
+
+- Typed helpers for the vesting family: `createVestingSchedule`, `claimVestedTokens`,
+  `cancelVesting`, `getVestingSchedule`.
+- Typed helpers for token locks: `lockTokens`, `extendLock`, `unlockTokens`, `unlockEarly`,
+  `getTokenLock`.
+- Typed helpers for funding rounds: `createFundingRound`, `approveFundingRound`,
+  `submitMilestone`, `verifyMilestone`, `releaseRoundFunds`, `cancelFundingRound`,
+  `getFundingRound`.
+- Escrow helpers `resolveEscrowDispute`, `getEscrowInfo`, `getFunderEscrows`,
+  `getRecipientEscrows`.
+- Types `VestingSchedule`, `TokenLock`, `FundingRound`, `FundingMilestone`,
+  `FundingMilestoneInput`, `EscrowMilestone`, `EscrowMilestoneInput` and enums `EscrowStatus`,
+  `FundingRoundStatus`, `FundingMilestoneStatus`.
+- Examples: `create-vesting.ts`, `lock-tokens.ts`, `create-escrow.ts`, `funding-round.ts`.
+
+### Changed
+
+- **Breaking:** escrow helpers now match the contract's signatures (the previous versions
+  produced transactions the contract would reject):
+  - `createEscrow` takes a `milestones` array and the arbitrator last
+    (`funder, recipient, token, amount, milestones, durationLedgers, arbitrator, opts`).
+  - `completeMilestone` takes a `milestoneId`; `disputeEscrow` takes a `reason` symbol;
+    `completeMilestone`, `releaseEscrow` and `disputeEscrow` now pass the caller address.
+- **Breaking:** the `Escrow` type now mirrors the on-chain struct (`totalAmount`,
+  `milestones`, `expiresAt`, …).
 
 ---
 

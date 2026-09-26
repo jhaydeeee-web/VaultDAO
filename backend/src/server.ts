@@ -290,7 +290,16 @@ export async function startServer(
     runtime.lifecycleManager = lifecycleManager;
   }
 
-  const wsServer = new EventWebSocketServer(server, env.wsMaxSubscriptionsPerClient);
+  const wsServer = new EventWebSocketServer(
+    server,
+    env.wsMaxSubscriptionsPerClient,
+    undefined,
+    {
+      authTimeoutMs: env.wsAuthTimeoutMs,
+      maxConnections: env.wsMaxConnections,
+      maxConnectionsPerIp: env.wsMaxConnectionsPerIp,
+    },
+  );
   runtime.wsServer = wsServer;
 
   // SSE is a read-only alternative to the WebSocket channel — it piggybacks

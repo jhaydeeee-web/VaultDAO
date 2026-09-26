@@ -16,6 +16,13 @@ export type {
   StreamingPayment,
   Subscription,
   Escrow,
+  EscrowMilestone,
+  EscrowMilestoneInput,
+  VestingSchedule,
+  TokenLock,
+  FundingRound,
+  FundingMilestone,
+  FundingMilestoneInput,
   ProposalTemplate,
   Comment,
   VaultMetrics,
@@ -30,7 +37,15 @@ export type {
 } from "./types";
 
 // Enums & errors
-export { Role, ProposalStatus, VaultErrorCode, VaultError } from "./types";
+export {
+  Role,
+  ProposalStatus,
+  EscrowStatus,
+  FundingRoundStatus,
+  FundingMilestoneStatus,
+  VaultErrorCode,
+  VaultError,
+} from "./types";
 
 // Error code registry
 export type { ErrorRegistryEntry } from "./errors";
@@ -94,11 +109,6 @@ export {
   createSubscription,
   renewSubscription,
   cancelSubscription,
-  // Escrow
-  createEscrow,
-  completeMilestone,
-  releaseEscrow,
-  disputeEscrow,
   // Templates
   createTemplate,
   proposeFromTemplate,
@@ -123,6 +133,38 @@ export {
   getTodaySpent,
   isSigner,
 } from "./contract";
+
+// Token flows: vesting, token locks, escrow, funding rounds
+export {
+  // Vesting
+  createVestingSchedule,
+  claimVestedTokens,
+  cancelVesting,
+  getVestingSchedule,
+  // Token locks
+  lockTokens,
+  extendLock,
+  unlockTokens,
+  unlockEarly,
+  getTokenLock,
+  // Escrow
+  createEscrow,
+  completeMilestone,
+  releaseEscrow,
+  disputeEscrow,
+  resolveEscrowDispute,
+  getEscrowInfo,
+  getFunderEscrows,
+  getRecipientEscrows,
+  // Funding rounds
+  createFundingRound,
+  approveFundingRound,
+  submitMilestone,
+  verifyMilestone,
+  releaseRoundFunds,
+  cancelFundingRound,
+  getFundingRound,
+} from "./token-flows";
 
 // Batch orchestration
 export {
