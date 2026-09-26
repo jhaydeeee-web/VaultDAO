@@ -635,6 +635,26 @@ pub fn set_role(env: &Env, addr: &Address, role: Role) {
     add_role_index_address(env, addr);
 }
 
+/// Remove the explicit role entry for `addr`, reverting it to the default
+/// (`Role::Member` as returned by `get_role` when no key exists).
+/// Also removes the address from the role index so it no longer appears in
+/// `get_role_assignments`.
+pub fn remove_role(env: &Env, addr: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Role(addr.clone()));
+
+    // Remove from the role index so the address is no longer enumerated.
+    let index = get_role_index(env);
+    let mut updated = Vec::new(env);
+    for a in index.iter() {
+        if a != *addr {
+            updated.push_back(a);
+        }
+    }
+    env.storage().instance().set(&DataKey::RoleIndex, &updated);
+}
+
 pub fn get_role_index(env: &Env) -> Vec<Address> {
     env.storage()
         .instance()
