@@ -769,6 +769,41 @@ For each event:
   2. `recipient: Address`
   3. `amount: i128`
 
+### Vesting
+
+Vesting events use a two-element topic: the event symbol followed by the schedule id. See the [Vesting guide](../guides/VESTING.md).
+
+#### `vesting_created`
+
+- **Contract topic**: `vesting_created`, `schedule_id: u64`
+- **Emitted by**: `create_vesting_schedule`
+- **Published data**:
+  1. `beneficiary: Address`
+  2. `token: Address`
+  3. `total: i128`
+  4. `cliff_ledger: u32`
+  5. `end_ledger: u32`
+
+> `start_ledger` is not part of the payload; read it with `get_vesting_schedule(schedule_id)`.
+
+#### `vesting_claimed`
+
+- **Contract topic**: `vesting_claimed`, `schedule_id: u64`
+- **Emitted by**: `claim_vested_tokens` (only when the claimable amount is non-zero)
+- **Published data**:
+  1. `beneficiary: Address`
+  2. `amount: i128` — amount transferred by this claim
+  3. `total_claimed: i128` — cumulative amount claimed on the schedule
+
+#### `vesting_cancelled`
+
+- **Contract topic**: `vesting_cancelled`, `schedule_id: u64`
+- **Emitted by**: `cancel_vesting` (not emitted when the schedule was already cancelled or fully claimed)
+- **Published data**:
+  1. `admin: Address`
+  2. `vested_unclaimed: i128` — paid to the beneficiary on cancellation
+  3. `unvested: i128` — released back to the treasury
+
 ### Cross-vault, bridge, permissions, disputes, DEX
 
 The remainder of `events.rs` includes many integration-oriented events. They are normalized and documented in the normalized payload section below.

@@ -29,6 +29,19 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # The remaining checks run even if an earlier one fails, so a single
+      # CI run reports every kind of breakage instead of stopping at the first.
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: npm run lint
+
+      - name: Unit tests
+        if: ${{ !cancelled() }}
+        run: npm test
+
+      - name: Production build
+        if: ${{ !cancelled() }}
+        run: npm run build
       - name: Unit tests
         run: npm test
 

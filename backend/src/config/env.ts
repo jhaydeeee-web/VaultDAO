@@ -1,4 +1,7 @@
-import { DEFAULT_SQLITE_POOL_SIZE } from "../shared/storage/sqlite-pool.js";
+import {
+  DEFAULT_SQLITE_POOL_SIZE,
+  isPrivateDatabase,
+} from "../shared/storage/sqlite-pool.js";
 
 export interface BackendEnv {
   readonly port: number;
@@ -512,6 +515,12 @@ export function loadEnv(): BackendEnv {
     ALLOWED_CURSOR_STORAGE_TYPES,
     issues,
   );
+
+  if (nodeEnv === "production" && isPrivateDatabase(databasePath)) {
+    issues.push(
+      `DATABASE_PATH must point to a persistent SQLite file in production. Received "${databasePath}".`,
+    );
+  }
 
   if (nodeEnv === "production" && corsOrigin.length === 0) {
     issues.push("CORS_ORIGIN is required in production environment.");
