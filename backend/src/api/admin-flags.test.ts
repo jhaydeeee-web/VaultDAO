@@ -108,7 +108,7 @@ test("Feature Flag Admin API Tests", async (t) => {
   });
 
   await t.test("POST /api/v1/admin/features/:flag/enable toggles flag on", async () => {
-    const response = await fetch(`${baseUrl}/api/v1/admin/features/test_flag/enable`, {
+    const response = await fetch(`${baseUrl}/api/v1/admin/features/sse/enable`, {
       method: "POST",
       headers: { Authorization: `Bearer ${mockEnv.apiKey}` },
     });
@@ -116,12 +116,12 @@ test("Feature Flag Admin API Tests", async (t) => {
     assert.strictEqual(response.status, 200);
     const body = (await response.json()) as any;
     assert.strictEqual(body.success, true);
-    assert.strictEqual(body.data.flag, "test_flag");
+    assert.strictEqual(body.data.flag, "sse");
     assert.strictEqual(body.data.enabled, true);
   });
 
   await t.test("POST /api/v1/admin/features/:flag/disable toggles flag off", async () => {
-    const response = await fetch(`${baseUrl}/api/v1/admin/features/test_flag/disable`, {
+    const response = await fetch(`${baseUrl}/api/v1/admin/features/sse/disable`, {
       method: "POST",
       headers: { Authorization: `Bearer ${mockEnv.apiKey}` },
     });
@@ -129,12 +129,39 @@ test("Feature Flag Admin API Tests", async (t) => {
     assert.strictEqual(response.status, 200);
     const body = (await response.json()) as any;
     assert.strictEqual(body.success, true);
-    assert.strictEqual(body.data.flag, "test_flag");
+    assert.strictEqual(body.data.flag, "sse");
     assert.strictEqual(body.data.enabled, false);
   });
 
+  await t.test("POST /api/v1/admin/features/:flag/enable returns 404 for unknown flag", async () => {
+    const response = await fetch(`${baseUrl}/api/v1/admin/features/sse_typo/enable`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${mockEnv.apiKey}` },
+    });
+
+    assert.strictEqual(response.status, 404);
+    const body = (await response.json()) as any;
+    assert.strictEqual(body.success, false);
+
+    // The typo must not create a phantom flag.
+    const list = await fetch(`${baseUrl}/api/v1/admin/features`, {
+      headers: { Authorization: `Bearer ${mockEnv.apiKey}` },
+    });
+    const listBody = (await list.json()) as any;
+    assert.strictEqual("sse_typo" in listBody.data, false);
+  });
+
+  await t.test("POST /api/v1/admin/features/:flag/disable returns 404 for unknown flag", async () => {
+    const response = await fetch(`${baseUrl}/api/v1/admin/features/not_a_flag/disable`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${mockEnv.apiKey}` },
+    });
+
+    assert.strictEqual(response.status, 404);
+  });
+
   await t.test("POST /api/v1/admin/features/:flag/enable returns 401 without auth", async () => {
-    const response = await fetch(`${baseUrl}/api/v1/admin/features/test_flag/enable`, {
+    const response = await fetch(`${baseUrl}/api/v1/admin/features/sse/enable`, {
       method: "POST",
     });
 

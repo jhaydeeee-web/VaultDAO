@@ -66,6 +66,12 @@ export interface BackendEnv {
   readonly jitterWindowMax: number;
   /** Maximum number of topic subscriptions a single WebSocket client may hold (default: 100). */
   readonly wsMaxSubscriptionsPerClient: number;
+  /** Close WebSocket connections that have not authenticated within this many ms (default: 10000). */
+  readonly wsAuthTimeoutMs: number;
+  /** Maximum concurrent WebSocket connections across all clients (default: 10000). */
+  readonly wsMaxConnections: number;
+  /** Maximum concurrent WebSocket connections from a single IP (default: 20). */
+  readonly wsMaxConnectionsPerIp: number;
   /** Enable the daily proposal archival job (default: true). */
   readonly proposalArchivalJobEnabled: boolean;
   /** Interval in ms between archival runs (default: 86400000 = 24 h). */
@@ -308,6 +314,9 @@ export function createTestEnv(overrides: Partial<BackendEnv> = {}): BackendEnv {
     rateLimitDefaultPerMin: 60,
     jitterWindowMax: 10,
     wsMaxSubscriptionsPerClient: 100,
+    wsAuthTimeoutMs: 10_000,
+    wsMaxConnections: 10_000,
+    wsMaxConnectionsPerIp: 20,
     proposalArchivalJobEnabled: false,
     proposalArchivalJobIntervalMs: 86_400_000,
     proposalArchivalThresholdDays: 180,
@@ -414,6 +423,13 @@ export function loadEnv(): BackendEnv {
   const wsMaxSubscriptionsPerClient = readPort(
     "WS_MAX_SUBSCRIPTIONS_PER_CLIENT",
     100,
+    issues,
+  );
+  const wsAuthTimeoutMs = readPort("WS_AUTH_TIMEOUT_MS", 10_000, issues);
+  const wsMaxConnections = readPort("WS_MAX_CONNECTIONS", 10_000, issues);
+  const wsMaxConnectionsPerIp = readPort(
+    "WS_MAX_CONNECTIONS_PER_IP",
+    20,
     issues,
   );
   const normalizerCacheMaxSize = readPort(
@@ -548,6 +564,9 @@ export function loadEnv(): BackendEnv {
     rateLimitDefaultPerMin,
     jitterWindowMax,
     wsMaxSubscriptionsPerClient,
+    wsAuthTimeoutMs,
+    wsMaxConnections,
+    wsMaxConnectionsPerIp,
     proposalArchivalJobEnabled,
     proposalArchivalJobIntervalMs,
     proposalArchivalThresholdDays,

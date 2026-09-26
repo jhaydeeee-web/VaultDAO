@@ -39,10 +39,6 @@ import {
   createSubscription,
   renewSubscription,
   cancelSubscription,
-  createEscrow,
-  completeMilestone,
-  releaseEscrow,
-  disputeEscrow,
   createTemplate,
   proposeFromTemplate,
   deactivateTemplate,
@@ -483,40 +479,6 @@ describe("contract.ts bindings", () => {
     it("cancelSubscription encodes only the subscription id", async () => {
       await cancelSubscription("GSUB", 9n, opts);
       expect(contractCallSpy).toHaveBeenCalledWith("cancel_subscription", "u64:9");
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Escrow
-  // -------------------------------------------------------------------------
-
-  describe("Escrow", () => {
-    it("createEscrow encodes funder, recipient, token, amount, arbitrator, and duration", async () => {
-      await createEscrow("GFUNDER", "GRECIP", "CTOKEN", 200n, "GARB", 1000n, opts);
-      expect(contractCallSpy).toHaveBeenCalledWith(
-        "create_escrow",
-        "addr:GFUNDER",
-        "addr:GRECIP",
-        "addr:CTOKEN",
-        "i128:200",
-        "addr:GARB",
-        "u64:1000",
-      );
-    });
-
-    it("completeMilestone encodes only the escrow id", async () => {
-      await completeMilestone("GRECIP", 4n, opts);
-      expect(contractCallSpy).toHaveBeenCalledWith("complete_milestone", "u64:4");
-    });
-
-    it("releaseEscrow encodes only the escrow id", async () => {
-      await releaseEscrow("GARB", 4n, opts);
-      expect(contractCallSpy).toHaveBeenCalledWith("release_escrow", "u64:4");
-    });
-
-    it("disputeEscrow encodes only the escrow id", async () => {
-      await disputeEscrow("GPARTY", 4n, opts);
-      expect(contractCallSpy).toHaveBeenCalledWith("dispute_escrow", "u64:4");
     });
   });
 

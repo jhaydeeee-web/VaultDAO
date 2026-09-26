@@ -18,12 +18,15 @@ The official TypeScript SDK for building on VaultDAO — a decentralized treasur
 10. [Event Subscription (WebSocket)](#event-subscription-websocket)
 11. [Streaming Payments](#streaming-payments)
 12. [Escrow Operations](#escrow-operations)
-13. [Proposal Templates](#proposal-templates)
-14. [Recovery Operations](#recovery-operations)
-15. [Error Handling](#error-handling)
-16. [TypeScript Types Reference](#typescript-types-reference)
-17. [Common Mistakes](#common-mistakes)
-18. [Examples](#examples)
+13. [Vesting Schedules](#vesting-schedules)
+14. [Token Locks](#token-locks)
+15. [Funding Rounds](#funding-rounds)
+16. [Proposal Templates](#proposal-templates)
+17. [Recovery Operations](#recovery-operations)
+18. [Error Handling](#error-handling)
+19. [TypeScript Types Reference](#typescript-types-reference)
+20. [Common Mistakes](#common-mistakes)
+21. [Examples](#examples)
 
 ---
 
@@ -758,7 +761,13 @@ const txXdr = await createEscrow(
   "GCONTRACTOR...",      // Contractor receiving funds
   "CDLZFC3...",          // Token
   BigInt(500_000_000),   // 50 XLM total
-  3,                     // 3 milestones
+  [
+    // Milestones are numbered 1..n in this order; percentages must sum to 100
+    { percentage: 30, releaseLedger: currentLedger + 120_960n },
+    { percentage: 70, releaseLedger: currentLedger + 518_400n },
+  ],
+  1_036_800n,            // Expires (full refund) after ~60 days
+  "GARBITRATOR...",      // Resolves disputes
   opts,
 );
 
@@ -768,25 +777,136 @@ const txHash = await signAndSubmit(txXdr, opts);
 ### Completing Milestones and Releasing Funds
 
 ```typescript
-import { completeMilestone, releaseEscrow, signAndSubmit } from "@vaultdao/sdk";
+import { completeMilestone, releaseEscrow, getEscrowInfo, signAndSubmit } from "@vaultdao/sdk";
 
 // Mark milestone 1 as complete
-const milestoneXdr = await completeMilestone(wallet.publicKey, escrowId, 1, opts);
+const milestoneXdr = await completeMilestone(wallet.publicKey, escrowId, 1n, opts);
 await signAndSubmit(milestoneXdr, opts);
 
 // Release funds for completed milestones
 const releaseXdr = await releaseEscrow(wallet.publicKey, escrowId, opts);
 await signAndSubmit(releaseXdr, opts);
+
+const escrow = await getEscrowInfo(escrowId, wallet.publicKey, opts);
+console.log(escrow.releasedAmount, escrow.milestones);
 ```
 
 ### Disputes
 
 ```typescript
-import { disputeEscrow, signAndSubmit } from "@vaultdao/sdk";
+import { disputeEscrow, resolveEscrowDispute, signAndSubmit } from "@vaultdao/sdk";
 
-const disputeXdr = await disputeEscrow(wallet.publicKey, escrowId, "Work not delivered", opts);
+// Reason is a Soroban Symbol (≤ 32 chars, letters/digits/underscore)
+const disputeXdr = await disputeEscrow(wallet.publicKey, escrowId, "not_delivered", opts);
 await signAndSubmit(disputeXdr, opts);
+
+// Arbitrator: true releases to the recipient, false refunds the funder
+const resolveXdr = await resolveEscrowDispute(arbitrator.publicKey, escrowId, false, opts);
 ```
+
+See [sdk/examples/create-escrow.ts](./examples/create-escrow.ts) for a full working example.
+
+---
+
+## Vesting Schedules
+
+Admins can reserve vault funds for a beneficiary that vest linearly between `startLedger` and `endLedger`, with nothing claimable before `cliffLedger` (`start <= cliff < end`).
+
+```typescript
+import {
+  createVestingSchedule,
+  claimVestedTokens,
+  cancelVesting,
+  getVestingSchedule,
+  signAndSubmit,
+} from "@vaultdao/sdk";
+
+const xdr = await createVestingSchedule(
+  admin.publicKey,
+  "GBENEFICIARY...",
+  "CDLZFC3...",           // Token
+  BigInt(10_000_000_000), // 1,000 XLM
+  cliffLedger,
+  startLedger,
+  endLedger,
+  opts,
+);
+await signAndSubmit(xdr, opts);
+
+// Beneficiary claims whatever has vested so far
+await signAndSubmit(await claimVestedTokens(beneficiary.publicKey, scheduleId, opts), opts);
+
+const schedule = await getVestingSchedule(scheduleId, beneficiary.publicKey, opts); // null if missing
+
+// Admin cancels; unvested tokens return to the vault
+await signAndSubmit(await cancelVesting(admin.publicKey, scheduleId, opts), opts);
+```
+
+See [sdk/examples/create-vesting.ts](./examples/create-vesting.ts).
+
+---
+
+## Token Locks
+
+Lock tokens for a number of ledgers to earn a voting-power multiplier.
+
+```typescript
+import { lockTokens, extendLock, unlockTokens, unlockEarly, getTokenLock } from "@vaultdao/sdk";
+
+await signAndSubmit(await lockTokens(wallet.publicKey, token, BigInt(1_000_000_000), 518_400n, opts), opts);
+await signAndSubmit(await extendLock(wallet.publicKey, 120_960n, opts), opts);
+
+const lock = await getTokenLock(wallet.publicKey, wallet.publicKey, opts); // null if none
+console.log(lock?.unlockAt, lock?.powerMultiplierBps);
+
+// After expiry:
+await signAndSubmit(await unlockTokens(wallet.publicKey, opts), opts);
+// Or exit early with a penalty:
+await signAndSubmit(await unlockEarly(wallet.publicKey, opts), opts);
+```
+
+See [sdk/examples/lock-tokens.ts](./examples/lock-tokens.ts).
+
+---
+
+## Funding Rounds
+
+Milestone-gated grants: a round is proposed, approved, and funds are released per milestone once it is submitted and verified. Milestones are addressed by **zero-based index**.
+
+```typescript
+import {
+  createFundingRound,
+  approveFundingRound,
+  submitMilestone,
+  verifyMilestone,
+  releaseRoundFunds,
+  cancelFundingRound,
+  getFundingRound,
+} from "@vaultdao/sdk";
+
+const xdr = await createFundingRound(
+  proposer.publicKey,
+  "GPROJECT...",
+  token,
+  BigInt(100_000_000_000),
+  [
+    // Either fixed amounts, or basis points that sum to exactly 10000
+    { description: "Testnet MVP", amount: 0n, releasePercentageBps: 4_000 },
+    { description: "Mainnet", amount: 0n, releasePercentageBps: 6_000, requiredVerifiers: 2 },
+  ],
+  opts,
+);
+
+await signAndSubmit(await approveFundingRound(admin.publicKey, roundId, opts), opts);
+await signAndSubmit(await submitMilestone(project.publicKey, roundId, 0, opts), opts);
+await signAndSubmit(await verifyMilestone(signer.publicKey, roundId, 0, opts), opts);
+await signAndSubmit(await releaseRoundFunds(signer.publicKey, roundId, 0, opts), opts);
+
+const round = await getFundingRound(roundId, wallet.publicKey, opts);
+console.log(round.status, round.milestones.map((m) => m.status));
+```
+
+See [sdk/examples/funding-round.ts](./examples/funding-round.ts).
 
 ---
 
@@ -952,6 +1072,11 @@ import type {
   StreamingPayment,  // Continuous streaming payment
   Subscription,      // Subscription record
   Escrow,            // Milestone-based escrow
+  EscrowMilestoneInput, // Milestone definition for createEscrow
+  VestingSchedule,   // Linear vesting schedule
+  TokenLock,         // Time-locked token position
+  FundingRound,      // Milestone-gated funding round
+  FundingMilestoneInput, // Milestone definition for createFundingRound
   ProposalTemplate,  // Reusable proposal template
   Comment,           // Proposal comment
 
@@ -968,6 +1093,9 @@ import type {
 import {
   Role,              // Member, Treasurer, Admin
   ProposalStatus,    // Pending, Approved, Executed, Rejected, Expired
+  EscrowStatus,      // Pending, Active, MilestonesComplete, Released, Refunded, Disputed
+  FundingRoundStatus,     // Pending, Approved, Active, Completed, Cancelled
+  FundingMilestoneStatus, // Pending, Submitted, Verified, Rejected
   VaultErrorCode,    // Contract error codes
 } from "@vaultdao/sdk";
 ```
@@ -1120,6 +1248,10 @@ Working example scripts are in the [`examples/`](./examples/) directory:
 | [`vote-proposal.ts`](./examples/vote-proposal.ts) | Full voting workflow: check, approve, execute |
 | [`create-recurring.ts`](./examples/create-recurring.ts) | Set up a recurring payment schedule |
 | [`listen-events.ts`](./examples/listen-events.ts) | Subscribe to real-time vault events via WebSocket |
+| [`create-vesting.ts`](./examples/create-vesting.ts) | Create a vesting schedule and claim vested tokens |
+| [`lock-tokens.ts`](./examples/lock-tokens.ts) | Lock, extend and unlock tokens for voting power |
+| [`create-escrow.ts`](./examples/create-escrow.ts) | Milestone escrow: fund, complete, release, dispute |
+| [`funding-round.ts`](./examples/funding-round.ts) | Funding round lifecycle: propose, approve, verify, release |
 
 Run any example:
 
