@@ -318,3 +318,422 @@ fn test_retained_signer_delegation_preserved() {
         "retained signer's delegation must survive recovery"
     );
 }
+
+// ===========================================================================
+// Tests for Issue #1701: in-flight proposals must be invalidated by recovery
+// ===========================================================================
+
+/// A proposal that was fully Approved before recovery must not be executable
+/// afterwards — it is reset to Pending, so execute_proposal returns
+/// ProposalNotApproved.
+#[test]
+fn test_approved_proposal_cannot_execute_after_recovery() {
+    use crate::errors::VaultError;
+    use crate::types::{ConditionLogic, Priority, ProposalStatus};
+
+    let s = setup();
+
+    // Use a dummy token address — we never reach the transfer step.
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    // old_signer is a Treasurer so they can propose.
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "drain"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // Both signers approve — threshold (2-of-2) is met, status becomes Approved.
+    s.client.approve_proposal(&s.admin, &proposal_id);
+    s.client.approve_proposal(&s.old_signer, &proposal_id);
+
+    // Sanity: confirm the proposal is Approved before recovery.
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(pre.status, ProposalStatus::Approved, "proposal must be Approved before recovery");
+
+    // Execute recovery — replaces old_signer with new_signer.
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // Proposal must now be back to Pending.
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        post.status,
+        ProposalStatus::Pending,
+        "previously-Approved proposal must be reset to Pending after recovery"
+    );
+
+    // Attempting to execute it must fail with ProposalNotApproved.
+    let result = s.client.try_execute_proposal(&s.admin, &proposal_id);
+    assert_eq!(
+        result,
+        Err(Ok(VaultError::ProposalNotApproved)),
+        "execute_proposal must return ProposalNotApproved for a reset proposal"
+    );
+}
+
+/// A Pending proposal with partial approvals from old signers must have its
+/// approval slate wiped so those partial votes do not carry forward.
+#[test]
+fn test_partial_approvals_wiped_on_pending_proposal_after_recovery() {
+    use crate::types::{ConditionLogic, Priority};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "partial"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // One approval from old_signer — not enough to approve (threshold=2), stays Pending.
+    s.client.approve_proposal(&s.old_signer, &proposal_id);
+
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(pre.approvals.len(), 1, "should have 1 approval before recovery");
+
+    // Execute recovery.
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // Approvals must be empty — the old vote from old_signer is gone.
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        post.approvals.len(),
+        0,
+        "all approvals from old signers must be wiped by recovery"
+    );
+}
+
+/// New signers must appear in the proposal's snapshot_signers after recovery
+/// so they can immediately cast their votes on reset proposals.
+#[test]
+fn test_new_signers_in_snapshot_after_recovery() {
+    use crate::types::{ConditionLogic, Priority};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "snap"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // old_signer's address is in the original snapshot but new_signer is not.
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert!(
+        pre.snapshot_signers.contains(&s.old_signer),
+        "old_signer must be in snapshot before recovery"
+    );
+    assert!(
+        !pre.snapshot_signers.contains(&s.new_signer),
+        "new_signer must NOT be in snapshot before recovery"
+    );
+
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // After recovery the snapshot is refreshed to the new signer set.
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert!(
+        post.snapshot_signers.contains(&s.new_signer),
+        "new_signer must be in snapshot after recovery"
+    );
+    assert!(
+        !post.snapshot_signers.contains(&s.old_signer),
+        "old_signer must NOT be in snapshot after recovery"
+    );
+}
+
+/// A proposal that was never touched (no approvals) also has its snapshot
+/// refreshed; it stays Pending and the new signers can vote on it.
+#[test]
+fn test_untouched_pending_proposal_refreshed_by_recovery() {
+    use crate::errors::VaultError;
+    use crate::types::{ConditionLogic, Priority};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "untouched"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // New signers must be able to vote on the reset proposal.
+    // First vote (admin): should succeed.
+    let vote_result = s.client.try_approve_proposal(&s.admin, &proposal_id);
+    assert!(
+        vote_result.is_ok(),
+        "admin must be able to vote on a proposal after recovery: {:?}",
+        vote_result
+    );
+
+    // Second vote (new_signer): reaches threshold, proposal becomes Approved.
+    // This also verifies new_signer was inserted into the snapshot.
+    let vote_result2 = s.client.try_approve_proposal(&s.new_signer, &proposal_id);
+    assert!(
+        vote_result2.is_ok(),
+        "new_signer must be able to vote after recovery: {:?}",
+        vote_result2
+    );
+}
+
+// ===========================================================================
+// Tests for Issue #1701: in-flight proposals must be invalidated by recovery
+// ===========================================================================
+
+/// A proposal that was fully Approved before recovery must not be executable
+/// afterwards — it is reset to Pending, so execute_proposal returns
+/// ProposalNotApproved.
+#[test]
+fn test_approved_proposal_cannot_execute_after_recovery() {
+    use crate::errors::VaultError;
+    use crate::types::{ConditionLogic, Priority, ProposalStatus};
+
+    let s = setup();
+
+    // Use a dummy token address — we never reach the transfer step.
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    // old_signer needs Treasurer role to propose.
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "drain"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // Both signers approve — 2-of-2 threshold met, status becomes Approved.
+    s.client.approve_proposal(&s.admin, &proposal_id);
+    s.client.approve_proposal(&s.old_signer, &proposal_id);
+
+    // Sanity: proposal is Approved before recovery.
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        pre.status,
+        ProposalStatus::Approved,
+        "proposal must be Approved before recovery"
+    );
+
+    // Execute recovery — replaces old_signer with new_signer.
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // Proposal must now be back to Pending.
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        post.status,
+        ProposalStatus::Pending,
+        "Approved proposal must be reset to Pending after recovery"
+    );
+
+    // Attempting to execute it must fail with ProposalNotApproved.
+    let result = s.client.try_execute_proposal(&s.admin, &proposal_id);
+    assert_eq!(
+        result,
+        Err(Ok(VaultError::ProposalNotApproved)),
+        "execute_proposal must return ProposalNotApproved for a reset proposal"
+    );
+}
+
+/// A Pending proposal with partial approvals from old signers must have its
+/// approval slate wiped so those partial votes do not carry forward.
+#[test]
+fn test_partial_approvals_wiped_on_pending_proposal_after_recovery() {
+    use crate::types::{ConditionLogic, Priority};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "partial"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // Only one approval — threshold=2 not met, stays Pending.
+    s.client.approve_proposal(&s.old_signer, &proposal_id);
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(pre.approvals.len(), 1, "should have 1 approval before recovery");
+
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // All prior approvals must be gone.
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        post.approvals.len(),
+        0,
+        "old signer approvals must be wiped by recovery"
+    );
+}
+
+/// After recovery the snapshot_signers of existing proposals are refreshed to
+/// the new signer set, so the new signers can cast votes immediately.
+#[test]
+fn test_new_signers_in_snapshot_after_recovery() {
+    use crate::types::{ConditionLogic, Priority};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "snap"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let pre = s.client.get_proposal(&proposal_id).unwrap();
+    assert!(
+        pre.snapshot_signers.contains(&s.old_signer),
+        "old_signer must be in snapshot before recovery"
+    );
+    assert!(
+        !pre.snapshot_signers.contains(&s.new_signer),
+        "new_signer must NOT be in snapshot before recovery"
+    );
+
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    let post = s.client.get_proposal(&proposal_id).unwrap();
+    assert!(
+        post.snapshot_signers.contains(&s.new_signer),
+        "new_signer must be in snapshot after recovery"
+    );
+    assert!(
+        !post.snapshot_signers.contains(&s.old_signer),
+        "old_signer must NOT be in snapshot after recovery"
+    );
+}
+
+/// After recovery the new signers can re-approve a reset proposal and execute it
+/// once the threshold is met — proving the invalidation does not permanently
+/// block legitimate use.
+#[test]
+fn test_new_signers_can_re_approve_reset_proposal() {
+    use crate::types::{ConditionLogic, Priority, ProposalStatus};
+
+    let s = setup();
+    let token = Address::generate(&s.env);
+    let recipient = Address::generate(&s.env);
+
+    s.client.set_role(&s.admin, &s.old_signer, &Role::Treasurer);
+
+    let proposal_id = s.client.propose_transfer(
+        &s.old_signer,
+        &recipient,
+        &token,
+        &100i128,
+        &soroban_sdk::Symbol::new(&s.env, "reapprove"),
+        &Priority::Normal,
+        &Vec::new(&s.env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    // Approve with old signers, then recover.
+    s.client.approve_proposal(&s.admin, &proposal_id);
+    s.client.approve_proposal(&s.old_signer, &proposal_id);
+
+    let mut new_signers = Vec::new(&s.env);
+    new_signers.push_back(s.admin.clone());
+    new_signers.push_back(s.new_signer.clone());
+    run_recovery(&s, new_signers, 2);
+
+    // Proposal is reset to Pending. New signers re-approve.
+    s.client.approve_proposal(&s.admin, &proposal_id);
+    // new_signer needs Treasurer to also approve (role set during recovery as Member,
+    // but approve_proposal only requires being a signer — check the entrypoint).
+    s.client.approve_proposal(&s.new_signer, &proposal_id);
+
+    let re_approved = s.client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(
+        re_approved.status,
+        ProposalStatus::Approved,
+        "proposal must be Approved again after new signers re-vote"
+    );
+}

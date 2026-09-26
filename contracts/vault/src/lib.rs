@@ -13670,6 +13670,49 @@ impl VaultDAO {
             storage::set_role(&env, &signer, Role::Member);
         }
 
+        // ----------------------------------------------------------------
+        // Issue #1701: wipe approvals on every non-final proposal so that
+        // votes collected from the (possibly compromised) old signer set
+        // cannot be used to execute proposals after recovery.
+        //
+        // We touch Pending, Approved, and Scheduled proposals — all statuses
+        // that still allow execution.  For each:
+        //   - Clear the approvals and abstentions vectors.
+        //   - If the proposal was Approved or Scheduled, demote it back to
+        //     Pending so execute_proposal will reject it until the new signer
+        //     set re-votes.
+        //   - Also clear snapshot_signers / signer_snapshot so the new set
+        //     can vote under the fresh config rather than the old snapshot.
+        // ----------------------------------------------------------------
+        let statuses_to_invalidate: [u32; 3] = [
+            ProposalStatus::Pending as u32,
+            ProposalStatus::Approved as u32,
+            ProposalStatus::Scheduled as u32,
+        ];
+
+        let mut invalidated_ids: Vec<u64> = Vec::new(&env);
+
+        for status_u32 in statuses_to_invalidate.iter() {
+            let ids = storage::get_all_proposals_by_status_uncapped(&env, *status_u32);
+            for pid in ids.iter() {
+                if let Ok(mut p) = storage::get_proposal(&env, pid) {
+                    p.approvals = Vec::new(&env);
+                    p.abstentions = Vec::new(&env);
+                    // Refresh the signer snapshot to the new signer set so the
+                    // new signers are eligible to vote immediately.
+                    p.snapshot_signers = new_signers.clone();
+                    p.signer_snapshot = Map::new(&env);
+                    // Demote any already-approved/scheduled proposal back to
+                    // Pending; Pending proposals stay Pending.
+                    if p.status != ProposalStatus::Pending {
+                        p.status = ProposalStatus::Pending;
+                    }
+                    storage::set_proposal(&env, &p);
+                    invalidated_ids.push_back(pid);
+                }
+            }
+        }
+
         config.signers = new_signers;
         config.threshold = proposal.new_threshold;
         // Reset quorum and other fields to safe defaults if they were invalid for new signers
@@ -13683,6 +13726,9 @@ impl VaultDAO {
         storage::set_recovery_proposal(&env, &proposal);
 
         events::emit_recovery_executed(&env, proposal_id);
+        if !invalidated_ids.is_empty() {
+            events::emit_proposals_invalidated_by_recovery(&env, proposal_id, invalidated_ids);
+        }
         events::emit_config_updated(&env, &env.current_contract_address());
 
         Ok(())
