@@ -5,7 +5,8 @@ import ResizableDashboard from '../ResizableDashboard';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────────
 
-vi.mock('react-grid-layout', () => ({
+// The component imports the legacy (v1-compatible) entry point.
+vi.mock('react-grid-layout/legacy', () => ({
   default: ({
     children,
     layout,

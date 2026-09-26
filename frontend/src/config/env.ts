@@ -58,5 +58,11 @@ export const env = {
   feeMultiplier: parseFloat(optionalEnv('VITE_FEE_MULTIPLIER', '1.5')),
   /** Upper bound, in stroops, for the inclusion fee the app will offer. */
   maxBaseFee: parseInt(optionalEnv('VITE_MAX_BASE_FEE', '100000'), 10),
+  /**
+   * JSON widget registry backing the Widget Marketplace (preview). Defaults to
+   * the repo-hosted registry in public/widgets/registry.json; point it at a
+   * backend endpoint once one exists.
+   */
+  widgetRegistryUrl: optionalEnv('VITE_WIDGET_REGISTRY_URL', '/widgets/registry.json'),
   walletIdleTimeoutMs: parseInt(optionalEnv('VITE_WALLET_IDLE_TIMEOUT_MS', '900000'), 10),
 } as const;

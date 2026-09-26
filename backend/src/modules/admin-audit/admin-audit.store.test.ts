@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AdminAuditLogStore } from "./admin-audit.store.js";
+import { SqliteConnectionPool } from "../../shared/storage/sqlite-pool.js";
 
-function makeStore(): AdminAuditLogStore {
-  return new AdminAuditLogStore(":memory:");
+function makeStore(): { store: AdminAuditLogStore; pool: SqliteConnectionPool } {
+  const pool = new SqliteConnectionPool(":memory:");
+  return { store: new AdminAuditLogStore(pool), pool };
 }
 
 test("AdminAuditLogStore: records a write and reads it back", () => {
-  const store = makeStore();
+  const { store, pool } = makeStore();
 
   store.record({
     timestamp: "2026-08-26T00:00:00.000Z",
@@ -29,11 +31,11 @@ test("AdminAuditLogStore: records a write and reads it back", () => {
   assert.strictEqual(entry.statusCode, 200);
   assert.deepStrictEqual(JSON.parse(entry.requestBody!), { reason: "scheduled rotation" });
 
-  store.close();
+  pool.close();
 });
 
 test("AdminAuditLogStore: redacts sensitive fields in the stored request body", () => {
-  const store = makeStore();
+  const { store, pool } = makeStore();
 
   store.record({
     timestamp: "2026-08-26T00:00:00.000Z",
@@ -49,11 +51,11 @@ test("AdminAuditLogStore: redacts sensitive fields in the stored request body", 
   assert.strictEqual(body.origin, "https://example.com");
   assert.strictEqual(body.apiKey, "[REDACTED]");
 
-  store.close();
+  pool.close();
 });
 
 test("AdminAuditLogStore: orders entries newest-first and paginates", () => {
-  const store = makeStore();
+  const { store, pool } = makeStore();
 
   for (let i = 0; i < 5; i++) {
     store.record({
@@ -75,11 +77,11 @@ test("AdminAuditLogStore: orders entries newest-first and paginates", () => {
   const secondPage = store.list(2, 2);
   assert.match(secondPage.entries[0]!.endpoint, /call=2$/);
 
-  store.close();
+  pool.close();
 });
 
 test("AdminAuditLogStore: stores null request body when there is none", () => {
-  const store = makeStore();
+  const { store, pool } = makeStore();
 
   store.record({
     timestamp: "2026-08-26T00:00:00.000Z",
@@ -93,5 +95,24 @@ test("AdminAuditLogStore: stores null request body when there is none", () => {
   const { entries } = store.list();
   assert.strictEqual(entries[0]!.requestBody, null);
 
-  store.close();
+  pool.close();
+});
+
+test("AdminAuditLogStore: shares a pooled connection instead of opening its own", () => {
+  const { store, pool } = makeStore();
+
+  store.record({
+    timestamp: "2026-08-26T00:00:00.000Z",
+    method: "GET",
+    endpoint: "/api/v1/admin/key-status",
+    sourceIp: "127.0.0.1",
+    statusCode: 200,
+    requestBody: undefined,
+  });
+  store.list();
+
+  const stats = pool.stats();
+  assert.strictEqual(stats.open, 1);
+  assert.strictEqual(stats.inUse, 0);
+  pool.close();
 });

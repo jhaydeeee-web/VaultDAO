@@ -64,7 +64,7 @@ export interface SqlitePoolStats {
  * such pools are pinned to a single connection and skip WAL, which in-memory
  * databases do not support.
  */
-function isPrivateDatabase(path: string): boolean {
+export function isPrivateDatabase(path: string): boolean {
   return path === "" || path === ":memory:" || path.startsWith("file::memory:");
 }
 
