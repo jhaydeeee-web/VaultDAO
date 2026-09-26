@@ -27,7 +27,10 @@ const ProposalCardVotingPower = ({
   isLoading = false,
 }: ProposalCardVotingPowerProps) => {
   const displayVotingPower =
-    vaultConfig?.voteWeightModel !== 'Flat' && proposal.status === 'Pending' && walletVotingPower;
+    !!vaultConfig &&
+    vaultConfig.voteWeightModel !== 'Flat' &&
+    proposal.status === 'Pending' &&
+    !!walletVotingPower;
 
   return (
     <article>
@@ -77,7 +80,7 @@ describe('ProposalCard - Voting Power Display', () => {
         <ProposalCardVotingPower
           proposal={mockProposal}
           vaultConfig={{ voteWeightModel: 'Quadratic' }}
-          walletVotingPower="500'
+          walletVotingPower="500"
         />
       );
 
@@ -293,7 +296,7 @@ describe('ProposalCard - Voting Power Display', () => {
         <ProposalCardVotingPower
           proposal={mockProposal}
           vaultConfig={{ voteWeightModel: 'Quadratic' }}
-          walletVotingPower="100'
+          walletVotingPower="100"
         />
       );
 

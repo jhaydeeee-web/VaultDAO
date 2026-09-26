@@ -36,6 +36,25 @@ vi.mock('react-router-dom', async (importOriginal) => {
   };
 });
 
+// jsdom doesn't implement matchMedia; default to "no media query matches".
+// Tests that care about a specific query can still stub it themselves.
+if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    configurable: true,
+    value: (query: string): MediaQueryList => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
 // Silence console.error noise from expected async errors in tests
 const originalError = console.error.bind(console);
 beforeAll(() => {

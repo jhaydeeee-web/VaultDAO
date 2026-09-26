@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import VoiceCommands from '../VoiceCommands';
 import { voiceService } from '../../utils/voiceRecognition';
@@ -39,160 +39,90 @@ describe('VoiceCommands', () => {
   });
 
   describe('Destructive Action Confirmation', () => {
-    it('shows pending action confirmation prompt for approve', async () => {
-      const mockApprove = vi.fn();
-      const { rerender } = render(<VoiceCommands onApprove={mockApprove} />);
-
-      vi.useFakeTimers();
-
-      // Simulate "approve proposal" voice command by finding and executing the registered action
-      const registerCommandCalls = (voiceService.registerCommand as any).mock.calls;
-      const approveCommand = registerCommandCalls.find(call => call[0] === 'approve proposal');
-
-      if (approveCommand) {
-        approveCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
+    /**
+     * Invoke the most recently registered handler for a voice command, as the
+     * recognition service would. Assertions are synchronous after act(): RTL's
+     * waitFor cannot make progress while Vitest fake timers are installed.
+     */
+    function say(command: string) {
+      const calls = (voiceService.registerCommand as ReturnType<typeof vi.fn>).mock.calls;
+      const registration = [...calls].reverse().find((call) => call[0] === command);
+      expect(registration, `"${command}" should be registered`).toBeDefined();
+      act(() => {
+        registration![1].action();
       });
+    }
 
+    afterEach(() => {
       vi.useRealTimers();
     });
 
-    it('shows pending action confirmation prompt for reject', async () => {
+    it('shows pending action confirmation prompt for approve', () => {
+      const mockApprove = vi.fn();
+      render(<VoiceCommands onApprove={mockApprove} />);
+
+      say('approve proposal');
+
+      expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+
+    it('shows pending action confirmation prompt for reject', () => {
       const mockReject = vi.fn();
-      const { rerender } = render(<VoiceCommands onReject={mockReject} />);
+      render(<VoiceCommands onReject={mockReject} />);
 
-      vi.useFakeTimers();
+      say('reject proposal');
 
-      const registerCommandCalls = (voiceService.registerCommand as any).mock.calls;
-      const rejectCommand = registerCommandCalls.find(call => call[0] === 'reject proposal');
-
-      if (rejectCommand) {
-        rejectCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onReject={mockReject} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
-      });
-
-      vi.useRealTimers();
+      expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
+      expect(mockReject).not.toHaveBeenCalled();
     });
 
-    it('unconfirmed destructive commands are aborted after 10 seconds', async () => {
-      const mockApprove = vi.fn();
-      const { rerender } = render(<VoiceCommands onApprove={mockApprove} />);
-
+    it('unconfirmed destructive commands are aborted after 10 seconds', () => {
       vi.useFakeTimers();
+      const mockApprove = vi.fn();
+      render(<VoiceCommands onApprove={mockApprove} />);
 
-      const registerCommandCalls = (voiceService.registerCommand as any).mock.calls;
-      const approveCommand = registerCommandCalls.find(call => call[0] === 'approve proposal');
+      say('approve proposal');
+      expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
 
-      if (approveCommand) {
-        approveCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(10000);
       });
 
-      // Fast-forward 10 seconds
-      vi.advanceTimersByTime(10000);
-
-      // Rerender to capture state update
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      await waitFor(() => {
-        expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
-      });
-
-      // Action should not have been called since confirmation was not given
+      expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
+      // Confirming after the timeout must not run the stale action
+      say('confirm action');
       expect(mockApprove).not.toHaveBeenCalled();
-
-      vi.useRealTimers();
     });
 
-    it('executes action when "confirm" is said within timeout window', async () => {
+    it('executes action when "confirm" is said within timeout window', () => {
       const mockApprove = vi.fn();
-      const { rerender } = render(<VoiceCommands onApprove={mockApprove} />);
+      render(<VoiceCommands onApprove={mockApprove} />);
 
-      vi.useFakeTimers();
+      say('approve proposal');
+      expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
 
-      const registerCommandCalls = (voiceService.registerCommand as any).mock.calls;
-      const approveCommand = registerCommandCalls.find(call => call[0] === 'approve proposal');
-      const confirmCommand = registerCommandCalls.find(call => call[0] === 'confirm action');
+      say('confirm action');
 
-      if (approveCommand) {
-        approveCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
-      });
-
-      // Now say "confirm"
-      if (confirmCommand) {
-        confirmCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      // Action should have been called
-      expect(mockApprove).toHaveBeenCalled();
-
-      // Pending confirmation should be gone
-      await waitFor(() => {
-        expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
-      });
-
-      vi.useRealTimers();
+      expect(mockApprove).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
     });
 
-    it('cancels pending action when "cancel" is said', async () => {
+    it('cancels pending action when "cancel" is said', () => {
       const mockApprove = vi.fn();
-      const { rerender } = render(<VoiceCommands onApprove={mockApprove} />);
+      render(<VoiceCommands onApprove={mockApprove} />);
 
-      vi.useFakeTimers();
+      say('approve proposal');
+      expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
 
-      const registerCommandCalls = (voiceService.registerCommand as any).mock.calls;
-      const approveCommand = registerCommandCalls.find(call => call[0] === 'approve proposal');
-      const cancelCommand = registerCommandCalls.find(call => call[0] === 'cancel action');
+      say('cancel action');
 
-      if (approveCommand) {
-        approveCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Action pending confirmation/i)).toBeInTheDocument();
-      });
-
-      // Say "cancel"
-      if (cancelCommand) {
-        cancelCommand[1].action();
-      }
-
-      rerender(<VoiceCommands onApprove={mockApprove} />);
-
-      // Action should NOT have been called
       expect(mockApprove).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
 
-      // Pending confirmation should be gone
-      await waitFor(() => {
-        expect(screen.queryByText(/Action pending confirmation/i)).not.toBeInTheDocument();
-      });
-
-      vi.useRealTimers();
+      // A later "confirm" must not resurrect the cancelled action
+      say('confirm action');
+      expect(mockApprove).not.toHaveBeenCalled();
     });
   });
 });

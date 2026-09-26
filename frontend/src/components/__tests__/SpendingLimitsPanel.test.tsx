@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { SpendingLimitsPanel } from '../SpendingLimitsPanel';
+import SpendingLimitsPanel from '../SpendingLimitsPanel';
 import { useVaultContract } from '../../hooks/useVaultContract';
 
 // Mock useVaultContract hook
